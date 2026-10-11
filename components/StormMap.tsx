@@ -1,9 +1,8 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect */
 
-import { useEffect, useMemo, useRef } from "react";
-import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type RasterTileSource } from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
-import type { Feature, FeatureCollection, LineString, Point, Polygon } from "geojson";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { LocateFixed, Minus, Plus } from "lucide-react";
 import type { Coordinates, StormCandidate } from "@/lib/domain";
 import { destinationPoint } from "@/lib/geodesy";
 
@@ -22,156 +21,147 @@ interface StormMapProps {
   onSelect: (id: string) => void;
 }
 
-function syncRadarLayer(map: MapLibreMap, radar: RadarMetadata | null, visible: boolean) {
-  if (!map.isStyleLoaded()) return;
-  const existing = map.getSource("radar") as RasterTileSource | undefined;
-  const latest = radar?.radar.past.at(-1);
-  const tiles = radar && latest ? [`${radar.host}${latest.path}/256/{z}/{x}/{y}/2/1_1.png`] : null;
-  if (!existing && tiles) {
-    map.addSource("radar", { type: "raster", tiles, tileSize: 256, maxzoom: 7 });
-    map.addLayer({ id: "radar", type: "raster", source: "radar", paint: { "raster-opacity": visible ? 0.52 : 0, "raster-fade-duration": 250 } }, "uncertainty-fill");
-  } else if (existing && tiles) {
-    existing.setTiles(tiles);
-    map.setPaintProperty("radar", "raster-opacity", visible ? 0.52 : 0);
-  }
+const TILE_SIZE = 256;
+const MIN_ZOOM = 3;
+const MAX_ZOOM = 7;
+
+function worldPoint(coordinates: Coordinates, zoom: number) {
+  const scale = TILE_SIZE * 2 ** zoom;
+  const latitude = Math.max(-85.0511, Math.min(85.0511, coordinates.latitude));
+  const sin = Math.sin(latitude * Math.PI / 180);
+  return {
+    x: (coordinates.longitude + 180) / 360 * scale,
+    y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale,
+  };
 }
 
-function circleLine(center: Coordinates, radiusKm: number): Feature<LineString> {
-  const coordinates = Array.from({ length: 73 }, (_, index) => {
-    const point = destinationPoint(center, radiusKm, index * 5);
-    return [point.longitude, point.latitude];
-  });
-  return { type: "Feature", properties: { radiusKm }, geometry: { type: "LineString", coordinates } };
+function worldCoordinates(x: number, y: number, zoom: number): Coordinates {
+  const scale = TILE_SIZE * 2 ** zoom;
+  const longitude = x / scale * 360 - 180;
+  const latitude = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / scale))) * 180 / Math.PI;
+  return { latitude, longitude };
 }
 
-function uncertaintyPolygon(candidate: StormCandidate): Feature<Polygon> {
-  const coordinates = Array.from({ length: 73 }, (_, index) => {
-    const point = destinationPoint(candidate.coordinates, candidate.uncertaintyKm, index * 5);
-    return [point.longitude, point.latitude];
-  });
-  return { type: "Feature", properties: { id: candidate.id }, geometry: { type: "Polygon", coordinates: [[...coordinates, coordinates[0]]] } };
-}
-
-function sourceData(
-  observer: Coordinates,
-  candidates: StormCandidate[],
-  selectedId: string | null,
-  ringsVisible: boolean,
-) {
-  const points: FeatureCollection<Point> = {
-    type: "FeatureCollection",
-    features: [
-      { type: "Feature", properties: { kind: "observer", id: "observer", score: 0 }, geometry: { type: "Point", coordinates: [observer.longitude, observer.latitude] } },
-      ...candidates.map((candidate) => ({
-        type: "Feature" as const,
-        properties: { kind: "candidate", id: candidate.id, score: candidate.score.total, selected: candidate.id === selectedId },
-        geometry: { type: "Point" as const, coordinates: [candidate.coordinates.longitude, candidate.coordinates.latitude] },
-      })),
-    ],
-  };
-  const selected = candidates.find((candidate) => candidate.id === selectedId) ?? null;
-  const lines: FeatureCollection<LineString> = {
-    type: "FeatureCollection",
-    features: [
-      ...(ringsVisible ? [100, 200, 300, 400, 500, 600].map((radius) => circleLine(observer, radius)) : []),
-      ...(selected
-        ? [{
-            type: "Feature" as const,
-            properties: { kind: "bearing" },
-            geometry: {
-              type: "LineString" as const,
-              coordinates: [[observer.longitude, observer.latitude], [selected.coordinates.longitude, selected.coordinates.latitude]],
-            },
-          }]
-        : []),
-    ],
-  };
-  const polygons: FeatureCollection<Polygon> = {
-    type: "FeatureCollection",
-    features: selected ? [uncertaintyPolygon(selected)] : [],
-  };
-  return { points, lines, polygons };
+function radarLabel(radar: RadarMetadata | null) {
+  const timestamp = radar?.radar.past.at(-1)?.time;
+  if (!timestamp) return "Radar μη διαθέσιμο";
+  return `Radar ${new Intl.DateTimeFormat("el-GR", { hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp * 1000))}`;
 }
 
 export default function StormMap({ observer, candidates, selectedId, radar, radarVisible, ringsVisible, onSelect }: StormMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<MapLibreMap | null>(null);
-  const onSelectRef = useRef(onSelect);
-  const radarRef = useRef(radar);
-  const radarVisibleRef = useRef(radarVisible);
-  const data = useMemo(() => sourceData(observer, candidates, selectedId, ringsVisible), [observer, candidates, selectedId, ringsVisible]);
-  const dataRef = useRef(data);
-  const initialObserverRef = useRef(observer);
-
-  useEffect(() => { onSelectRef.current = onSelect; }, [onSelect]);
-  useEffect(() => { radarRef.current = radar; }, [radar]);
-  useEffect(() => { radarVisibleRef.current = radarVisible; }, [radarVisible]);
+  const dragRef = useRef<{ pointerX: number; pointerY: number; centerX: number; centerY: number } | null>(null);
+  const [size, setSize] = useState({ width: 900, height: 560 });
+  const [center, setCenter] = useState<Coordinates>(observer);
+  const [zoom, setZoom] = useState(4);
 
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
-    const initialObserver = initialObserverRef.current;
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      center: [initialObserver.longitude, initialObserver.latitude],
-      zoom: 4.7,
-      attributionControl: false,
-      style: {
-        version: 8,
-        sources: {
-          basemap: {
-            type: "raster",
-            tiles: ["https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"],
-            tileSize: 256,
-            attribution: "© OpenStreetMap contributors © CARTO",
-          },
-        },
-        layers: [{ id: "basemap", type: "raster", source: "basemap", paint: { "raster-saturation": -0.55, "raster-brightness-max": 0.72, "raster-contrast": 0.1 } }],
-      },
+    const element = containerRef.current;
+    if (!element) return;
+    const resize = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+        setSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+      }
     });
-    map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
-    map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
-    map.on("load", () => {
-      map.addSource("uncertainty", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-      map.addLayer({ id: "uncertainty-fill", type: "fill", source: "uncertainty", paint: { "fill-color": "#f04362", "fill-opacity": 0.12 } });
-      map.addLayer({ id: "uncertainty-outline", type: "line", source: "uncertainty", paint: { "line-color": "#ff6a80", "line-width": 1.5, "line-dasharray": [2, 2] } });
-      map.addSource("guides", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-      map.addLayer({ id: "guides", type: "line", source: "guides", paint: { "line-color": ["case", ["==", ["get", "kind"], "bearing"], "#f2647c", "#6a8399"], "line-width": ["case", ["==", ["get", "kind"], "bearing"], 2, 1], "line-opacity": 0.65, "line-dasharray": [2, 2] } });
-      map.addSource("targets", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-      map.addLayer({ id: "target-halo", type: "circle", source: "targets", filter: ["==", ["get", "kind"], "candidate"], paint: { "circle-radius": ["case", ["==", ["get", "selected"], true], 18, 11], "circle-color": "#f04362", "circle-opacity": 0.13, "circle-stroke-width": 1, "circle-stroke-color": "#ff8194" } });
-      map.addLayer({ id: "targets", type: "circle", source: "targets", filter: ["==", ["get", "kind"], "candidate"], paint: { "circle-radius": ["interpolate", ["linear"], ["get", "score"], 0, 5, 69, 10], "circle-color": ["interpolate", ["linear"], ["get", "score"], 0, "#6d7f8f", 35, "#e0a84f", 69, "#f04362"], "circle-stroke-width": 2, "circle-stroke-color": "#07111d" } });
-      map.addLayer({ id: "observer", type: "circle", source: "targets", filter: ["==", ["get", "kind"], "observer"], paint: { "circle-radius": 7, "circle-color": "#7de4ca", "circle-stroke-width": 3, "circle-stroke-color": "#07111d" } });
-      map.on("click", "targets", (event) => {
-        const id = event.features?.[0]?.properties?.id;
-        if (typeof id === "string") onSelectRef.current(id);
-      });
-      map.on("mouseenter", "targets", () => { map.getCanvas().style.cursor = "pointer"; });
-      map.on("mouseleave", "targets", () => { map.getCanvas().style.cursor = ""; });
-      (map.getSource("targets") as GeoJSONSource).setData(dataRef.current.points);
-      (map.getSource("guides") as GeoJSONSource).setData(dataRef.current.lines);
-      (map.getSource("uncertainty") as GeoJSONSource).setData(dataRef.current.polygons);
-      syncRadarLayer(map, radarRef.current, radarVisibleRef.current);
-    });
-    mapRef.current = map;
-    return () => { map.remove(); mapRef.current = null; };
+    resize.observe(element);
+    return () => resize.disconnect();
   }, []);
 
-  useEffect(() => {
-    dataRef.current = data;
-    const map = mapRef.current;
-    if (!map?.isStyleLoaded()) return;
-    (map.getSource("targets") as GeoJSONSource | undefined)?.setData(data.points);
-    (map.getSource("guides") as GeoJSONSource | undefined)?.setData(data.lines);
-    (map.getSource("uncertainty") as GeoJSONSource | undefined)?.setData(data.polygons);
-  }, [data]);
+  useEffect(() => setCenter(observer), [observer]);
 
-  useEffect(() => {
-    const map = mapRef.current;
-    if (map) syncRadarLayer(map, radar, radarVisible);
-  }, [radar, radarVisible]);
+  const scene = useMemo(() => {
+    const scale = TILE_SIZE * 2 ** zoom;
+    const centerWorld = worldPoint(center, zoom);
+    const left = centerWorld.x - size.width / 2;
+    const top = centerWorld.y - size.height / 2;
+    const firstX = Math.floor(left / TILE_SIZE);
+    const lastX = Math.floor((left + size.width) / TILE_SIZE);
+    const firstY = Math.max(0, Math.floor(top / TILE_SIZE));
+    const lastY = Math.min(2 ** zoom - 1, Math.floor((top + size.height) / TILE_SIZE));
+    const tiles = [];
+    for (let y = firstY; y <= lastY; y += 1) {
+      for (let x = firstX; x <= lastX; x += 1) {
+        const wrappedX = ((x % 2 ** zoom) + 2 ** zoom) % 2 ** zoom;
+        tiles.push({ key: `${x}-${y}`, x: wrappedX, y, left: x * TILE_SIZE - left, top: y * TILE_SIZE - top });
+      }
+    }
+    const project = (point: Coordinates) => {
+      const world = worldPoint(point, zoom);
+      let x = world.x - left;
+      if (x < -scale / 2) x += scale;
+      if (x > scale / 2 + size.width) x -= scale;
+      return { x, y: world.y - top };
+    };
+    return { centerWorld, left, top, tiles, project };
+  }, [center, size, zoom]);
 
-  useEffect(() => {
-    mapRef.current?.easeTo({ center: [observer.longitude, observer.latitude], duration: 700 });
-  }, [observer.latitude, observer.longitude]);
+  const selected = candidates.find((candidate) => candidate.id === selectedId) ?? null;
+  const radarFrame = radar?.radar.past.at(-1);
+  const observerPoint = scene.project(observer);
+  const ringPaths = ringsVisible ? [100, 200, 300, 400, 500, 600].map((radiusKm) => ({
+    radiusKm,
+    points: Array.from({ length: 73 }, (_, index) => scene.project(destinationPoint(observer, radiusKm, index * 5))).map((point) => `${point.x},${point.y}`).join(" "),
+  })) : [];
+  const uncertaintyPoints = selected
+    ? Array.from({ length: 73 }, (_, index) => scene.project(destinationPoint(selected.coordinates, selected.uncertaintyKm, index * 5))).map((point) => `${point.x},${point.y}`).join(" ")
+    : "";
 
-  return <div ref={containerRef} className="storm-map" aria-label="Διαδραστικός χάρτης υποψήφιων καταιγίδων" />;
+  const recenter = () => setCenter(observer);
+  const changeZoom = (next: number) => setZoom(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next)));
+  const pointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const point = worldPoint(center, zoom);
+    dragRef.current = { pointerX: event.clientX, pointerY: event.clientY, centerX: point.x, centerY: point.y };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const pointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const next = worldCoordinates(drag.centerX - (event.clientX - drag.pointerX), drag.centerY - (event.clientY - drag.pointerY), zoom);
+    setCenter({ latitude: Math.max(-80, Math.min(80, next.latitude)), longitude: next.longitude });
+  };
+  const pointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className="storm-map tile-map"
+      aria-label="Διαδραστικός χάρτης υποψήφιων καταιγίδων"
+      onPointerDown={pointerDown}
+      onPointerMove={pointerMove}
+      onPointerUp={pointerUp}
+      onPointerCancel={pointerUp}
+    >
+      <div className="map-tiles" aria-hidden="true">
+        {scene.tiles.map((tile) => (
+          <div key={tile.key}>
+            <img className="map-tile" draggable={false} alt="" src={`https://basemaps.cartocdn.com/dark_all/${zoom}/${tile.x}/${tile.y}.png`} style={{ left: tile.left, top: tile.top }} />
+            {radarVisible && radar && radarFrame && <img className="map-tile radar-tile" draggable={false} alt="" src={`${radar.host}${radarFrame.path}/256/${zoom}/${tile.x}/${tile.y}/2/1_1.png`} style={{ left: tile.left, top: tile.top }} />}
+          </div>
+        ))}
+      </div>
+      <svg className="map-overlay" width={size.width} height={size.height} viewBox={`0 0 ${size.width} ${size.height}`}>
+        {ringPaths.map((ring) => <polyline key={ring.radiusKm} points={ring.points} className="range-ring" />)}
+        {selected && <>
+          <polygon points={uncertaintyPoints} className="uncertainty-area" />
+          <line x1={observerPoint.x} y1={observerPoint.y} x2={scene.project(selected.coordinates).x} y2={scene.project(selected.coordinates).y} className="bearing-line" />
+        </>}
+        <g className="observer-marker" transform={`translate(${observerPoint.x} ${observerPoint.y})`}><circle r="11" /><circle r="4" /></g>
+        {candidates.map((candidate) => {
+          const point = scene.project(candidate.coordinates);
+          const selectedCandidate = candidate.id === selectedId;
+          return <g key={candidate.id} className={`candidate-marker ${selectedCandidate ? "selected" : ""}`} transform={`translate(${point.x} ${point.y})`} role="button" tabIndex={0} aria-label={`Στόχος ${candidate.bearingDeg.toFixed(0)} μοιρών, δείκτης ${candidate.score.total}`} onClick={(event) => { event.stopPropagation(); onSelect(candidate.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(candidate.id); }}><circle className="candidate-halo" r={selectedCandidate ? 19 : 13} /><circle className="candidate-core" r={Math.max(6, candidate.score.total / 9)} /><text y="-19" textAnchor="middle">{candidate.score.total}</text></g>;
+        })}
+      </svg>
+      <div className="map-controls">
+        <button type="button" onClick={() => changeZoom(zoom + 1)} disabled={zoom === MAX_ZOOM} aria-label="Μεγέθυνση"><Plus size={17} /></button>
+        <button type="button" onClick={() => changeZoom(zoom - 1)} disabled={zoom === MIN_ZOOM} aria-label="Σμίκρυνση"><Minus size={17} /></button>
+        <button type="button" onClick={recenter} aria-label="Κεντράρισμα στη θέση παρατήρησης"><LocateFixed size={17} /></button>
+      </div>
+      <div className="map-status"><span>HTML tiles · χωρίς WebGL</span><span>{radarVisible ? radarLabel(radar) : "Radar κρυφό"}</span></div>
+    </div>
+  );
 }
