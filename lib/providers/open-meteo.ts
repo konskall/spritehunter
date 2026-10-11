@@ -322,10 +322,10 @@ export async function fetchOpportunities(
       { id: "rainviewer", label: "RainViewer radar", status: "available", checkedAt: fetchedAt, message: "Public radar metadata is queried on the map; coverage is best-effort." },
       {
         id: "xweather",
-        label: "Vaisala Xweather lightning",
+        label: "Vaisala Xweather (προαιρετικό)",
         status: xweatherConfigured ? "available" : "not_configured",
         checkedAt: fetchedAt,
-        message: xweatherConfigured ? "Credentials configured; queries are limited to selected candidate regions." : "Προαιρετικός πάροχος πραγματικών χτυπημάτων· δεν έχουν οριστεί επί πληρωμή διαπιστευτήρια.",
+        message: xweatherConfigured ? "Credentials configured; queries are limited to selected candidate regions." : "Δεν απαιτείται για τον live χάρτη: το δωρεάν MTG-LI καλύπτει τη συνολική δραστηριότητα. Xweather χρειάζεται μόνο για δεδομένα CG/IC, πολικότητας και peak current.",
       },
       { id: "terrain", label: "OpenTopoData SRTM", status: "available", checkedAt: fetchedAt, message: "Terrain is requested on demand for the selected bearing to conserve the public quota." },
     ],

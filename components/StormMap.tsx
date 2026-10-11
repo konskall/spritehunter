@@ -1,10 +1,11 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { LocateFixed, Minus, Plus } from "lucide-react";
-import type { Coordinates, StormCandidate } from "@/lib/domain";
+import type { Coordinates, EumetsatMetadata, StormCandidate } from "@/lib/domain";
 import { destinationPoint } from "@/lib/geodesy";
+import { eumetsatTileUrl } from "@/lib/providers/eumetsat";
 
 interface RadarMetadata {
   host: string;
@@ -17,13 +18,20 @@ interface StormMapProps {
   selectedId: string | null;
   radar: RadarMetadata | null;
   radarVisible: boolean;
+  lightningVisible: boolean;
+  infraredVisible: boolean;
   ringsVisible: boolean;
+  eumetsat: EumetsatMetadata | null;
   onSelect: (id: string) => void;
 }
 
 const TILE_SIZE = 256;
 const MIN_ZOOM = 3;
-const MAX_ZOOM = 7;
+const MAX_ZOOM = 9;
+
+export function clampMapZoom(zoom: number) {
+  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
+}
 
 function worldPoint(coordinates: Coordinates, zoom: number) {
   const scale = TILE_SIZE * 2 ** zoom;
@@ -48,9 +56,17 @@ function radarLabel(radar: RadarMetadata | null) {
   return `Radar ${new Intl.DateTimeFormat("el-GR", { hour: "2-digit", minute: "2-digit" }).format(new Date(timestamp * 1000))}`;
 }
 
-export default function StormMap({ observer, candidates, selectedId, radar, radarVisible, ringsVisible, onSelect }: StormMapProps) {
+function satelliteLabel(eumetsat: EumetsatMetadata | null) {
+  if (!eumetsat?.lightningTime) return "MTG-LI μη διαθέσιμο";
+  return `MTG-LI ${new Intl.DateTimeFormat("el-GR", { timeZone: "Europe/Athens", hour: "2-digit", minute: "2-digit" }).format(new Date(eumetsat.lightningTime))}`;
+}
+
+export default function StormMap({ observer, candidates, selectedId, radar, radarVisible, lightningVisible, infraredVisible, ringsVisible, eumetsat, onSelect }: StormMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerX: number; pointerY: number; centerX: number; centerY: number } | null>(null);
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchRef = useRef<{ distance: number; zoom: number } | null>(null);
+  const lastWheelRef = useRef(0);
   const [size, setSize] = useState({ width: 900, height: 560 });
   const [center, setCenter] = useState<Coordinates>(observer);
   const [zoom, setZoom] = useState(4);
@@ -107,22 +123,54 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
     : "";
 
   const recenter = () => setCenter(observer);
-  const changeZoom = (next: number) => setZoom(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next)));
+  const changeZoom = (delta: number) => setZoom((current) => clampMapZoom(current + delta));
   const pointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest("[data-map-interactive]")) return;
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (pointersRef.current.size >= 2) {
+      const [first, second] = Array.from(pointersRef.current.values());
+      pinchRef.current = { distance: Math.hypot(first.x - second.x, first.y - second.y), zoom };
+      dragRef.current = null;
+      return;
+    }
     const point = worldPoint(center, zoom);
     dragRef.current = { pointerX: event.clientX, pointerY: event.clientY, centerX: point.x, centerY: point.y };
-    event.currentTarget.setPointerCapture(event.pointerId);
   };
   const pointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!pointersRef.current.has(event.pointerId)) return;
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (pointersRef.current.size >= 2 && pinchRef.current) {
+      const [first, second] = Array.from(pointersRef.current.values());
+      const distance = Math.hypot(first.x - second.x, first.y - second.y);
+      if (pinchRef.current.distance > 0) {
+        setZoom(clampMapZoom(Math.round(pinchRef.current.zoom + Math.log2(distance / pinchRef.current.distance))));
+      }
+      return;
+    }
     const drag = dragRef.current;
     if (!drag) return;
     const next = worldCoordinates(drag.centerX - (event.clientX - drag.pointerX), drag.centerY - (event.clientY - drag.pointerY), zoom);
     setCenter({ latitude: Math.max(-80, Math.min(80, next.latitude)), longitude: next.longitude });
   };
   const pointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    pointersRef.current.delete(event.pointerId);
     dragRef.current = null;
+    if (pointersRef.current.size < 2) pinchRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  const wheelZoom = (event: ReactWheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const now = Date.now();
+    if (now - lastWheelRef.current < 140) return;
+    lastWheelRef.current = now;
+    changeZoom(event.deltaY < 0 ? 1 : -1);
+  };
+  const keyboardZoom = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === "+" || event.key === "=") { event.preventDefault(); changeZoom(1); }
+    if (event.key === "-") { event.preventDefault(); changeZoom(-1); }
   };
 
   return (
@@ -130,16 +178,23 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
       ref={containerRef}
       className="storm-map tile-map"
       aria-label="Διαδραστικός χάρτης υποψήφιων καταιγίδων"
+      aria-description="Μεγέθυνση με τα κουμπιά, τη ροδέλα, διπλό πάτημα ή χειρονομία δύο δαχτύλων."
+      tabIndex={0}
       onPointerDown={pointerDown}
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}
       onPointerCancel={pointerUp}
+      onWheel={wheelZoom}
+      onKeyDown={keyboardZoom}
+      onDoubleClick={(event) => { if (!(event.target instanceof Element && event.target.closest("[data-map-interactive]"))) changeZoom(1); }}
     >
       <div className="map-tiles" aria-hidden="true">
         {scene.tiles.map((tile) => (
           <div key={tile.key}>
             <img className="map-tile" draggable={false} alt="" src={`https://tile.openstreetmap.org/${zoom}/${tile.x}/${tile.y}.png`} style={{ left: tile.left, top: tile.top }} />
+            {infraredVisible && <img className="map-tile satellite-tile" draggable={false} alt="" src={eumetsatTileUrl("infrared", tile.x, tile.y, zoom, eumetsat?.infraredTime)} style={{ left: tile.left, top: tile.top }} />}
             {radarVisible && radar && radarFrame && <img className="map-tile radar-tile" draggable={false} alt="" src={`${radar.host}${radarFrame.path}/256/${zoom}/${tile.x}/${tile.y}/2/1_1.png`} style={{ left: tile.left, top: tile.top }} />}
+            {lightningVisible && <img className="map-tile lightning-tile" draggable={false} alt="" src={eumetsatTileUrl("lightning", tile.x, tile.y, zoom, eumetsat?.lightningTime)} style={{ left: tile.left, top: tile.top }} />}
           </div>
         ))}
       </div>
@@ -153,15 +208,16 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
         {candidates.map((candidate) => {
           const point = scene.project(candidate.coordinates);
           const selectedCandidate = candidate.id === selectedId;
-          return <g key={candidate.id} className={`candidate-marker ${selectedCandidate ? "selected" : ""}`} transform={`translate(${point.x} ${point.y})`} role="button" tabIndex={0} aria-label={`Στόχος ${candidate.bearingDeg.toFixed(0)} μοιρών, δείκτης ${candidate.score.total}`} onClick={(event) => { event.stopPropagation(); onSelect(candidate.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(candidate.id); }}><circle className="candidate-halo" r={selectedCandidate ? 19 : 13} /><circle className="candidate-core" r={Math.max(6, candidate.score.total / 9)} /><text y="-19" textAnchor="middle">{candidate.score.total}</text></g>;
+          return <g key={candidate.id} data-map-interactive className={`candidate-marker ${selectedCandidate ? "selected" : ""}`} transform={`translate(${point.x} ${point.y})`} role="button" tabIndex={0} aria-label={`Στόχος ${candidate.bearingDeg.toFixed(0)} μοιρών, δείκτης ${candidate.score.total}`} onClick={(event) => { event.stopPropagation(); onSelect(candidate.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(candidate.id); }}><circle className="candidate-halo" r={selectedCandidate ? 19 : 13} /><circle className="candidate-core" r={Math.max(6, candidate.score.total / 9)} /><text y="-19" textAnchor="middle">{candidate.score.total}</text></g>;
         })}
       </svg>
-      <div className="map-controls">
-        <button type="button" onClick={() => changeZoom(zoom + 1)} disabled={zoom === MAX_ZOOM} aria-label="Μεγέθυνση"><Plus size={17} /></button>
-        <button type="button" onClick={() => changeZoom(zoom - 1)} disabled={zoom === MIN_ZOOM} aria-label="Σμίκρυνση"><Minus size={17} /></button>
+      <div className="map-controls" data-map-interactive onPointerDown={(event) => event.stopPropagation()}>
+        <button type="button" onClick={() => changeZoom(1)} disabled={zoom === MAX_ZOOM} aria-label="Μεγέθυνση"><Plus size={17} /></button>
+        <span className="map-zoom-level" aria-live="polite">z{zoom}</span>
+        <button type="button" onClick={() => changeZoom(-1)} disabled={zoom === MIN_ZOOM} aria-label="Σμίκρυνση"><Minus size={17} /></button>
         <button type="button" onClick={recenter} aria-label="Κεντράρισμα στη θέση παρατήρησης"><LocateFixed size={17} /></button>
       </div>
-      <div className="map-status"><span>HTML tiles · χωρίς WebGL</span><span>{radarVisible ? radarLabel(radar) : "Radar κρυφό"}</span></div>
+      <div className="map-status"><span>Zoom: κουμπιά · ροδέλα · pinch</span>{lightningVisible && <span>{satelliteLabel(eumetsat)}</span>}<span>{radarVisible ? radarLabel(radar) : "Radar κρυφό"}</span></div>
     </div>
   );
 }

@@ -14,6 +14,8 @@ import { shouldNotify } from "@/lib/notifications";
 import { clusterLightning, deduplicateLightning, estimateMotion } from "@/lib/storm-detection";
 import { athensUtcOffsetMinutes, dataFreshness } from "@/lib/time";
 import { skyState } from "@/lib/astronomy";
+import { eumetsatTileUrl, parseEumetsatCapabilities, webMercatorTileBounds } from "@/lib/providers/eumetsat";
+import { clampMapZoom } from "@/components/StormMap";
 
 const sparta = { latitude: 37.075, longitude: 22.43, elevationM: 210 };
 
@@ -95,6 +97,30 @@ describe("camera framing", () => {
     const sigma = DEFAULT_LENSES.find((lens) => lens.id === "sigma-17-70-c013")!;
     expect(effectiveMaxAperture(sigma)).toBe(2.8);
     expect(effectiveMaxAperture({ ...sigma, focalLengthMm: 70 })).toBe(4);
+  });
+});
+
+describe("interactive map and EUMETSAT layers", () => {
+  it("keeps map zoom within supported levels", () => {
+    expect(clampMapZoom(2)).toBe(3);
+    expect(clampMapZoom(6)).toBe(6);
+    expect(clampMapZoom(12)).toBe(9);
+  });
+  it("parses the latest MTG lightning and infrared timestamps", () => {
+    const xml = `<Layer><Name>mtg_fd:li_afa</Name><Dimension name="time" default="2026-10-11T18:15:00Z" /></Layer><Layer><Name>mtg_fd:ir105_hrfi</Name><Dimension name="time" default="2026-10-11T18:10:00Z" /></Layer>`;
+    const result = parseEumetsatCapabilities(xml, "2026-10-11T18:16:00Z");
+    expect(result.status).toBe("available");
+    expect(result.lightningTime).toBe("2026-10-11T18:15:00Z");
+    expect(result.infraredTime).toBe("2026-10-11T18:10:00Z");
+  });
+  it("builds a georeferenced transparent WMS tile request", () => {
+    const bounds = webMercatorTileBounds(8, 6, 4);
+    expect(bounds.west).toBeCloseTo(0, 6);
+    expect(bounds.east).toBeCloseTo(22.5, 6);
+    const url = new URL(eumetsatTileUrl("lightning", 8, 6, 4, "2026-10-11T18:15:00Z"));
+    expect(url.searchParams.get("layers")).toBe("mtg_fd:li_afa");
+    expect(url.searchParams.get("transparent")).toBe("true");
+    expect(url.searchParams.get("time")).toBe("2026-10-11T18:15:00Z");
   });
 });
 

@@ -110,6 +110,14 @@ export interface AuroraResponse {
   message: string;
 }
 
+export interface EumetsatMetadata {
+  status: DataStatus;
+  retrievedAt: string;
+  lightningTime: string | null;
+  infraredTime: string | null;
+  message: string;
+}
+
 export interface OpportunityResponse {
   observer: Coordinates;
   fetchedAt: string;
