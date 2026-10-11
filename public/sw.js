@@ -1,5 +1,5 @@
-const CACHE = "spritehunter-shell-v1";
-const SHELL = ["/", "/manifest.webmanifest", "/favicon.svg"];
+const CACHE = "spritehunter-shell-v2";
+const SHELL = ["/", "/manifest.webmanifest", "/spritehunter-icon-192.png", "/spritehunter-icon-512.png", "/spritehunter-logo.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -18,4 +18,3 @@ self.addEventListener("fetch", (event) => {
     return response;
   }).catch(() => caches.match(event.request).then((cached) => cached || caches.match("/"))));
 });
-

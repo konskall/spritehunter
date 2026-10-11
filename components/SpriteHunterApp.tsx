@@ -320,8 +320,7 @@ export default function SpriteHunterApp() {
     <div className="app-shell">
       <aside className="sidebar">
         <button className="brand" onClick={() => setScreen("dashboard")} aria-label="SpriteHunter αρχική">
-          <span className="brand-mark"><Sparkles size={20} /></span>
-          <span><strong>SpriteHunter</strong><small>{t.subtitle}</small></span>
+          <img className="brand-logo" src="/spritehunter-logo.png" alt="" width="216" height="72" />
         </button>
         <nav aria-label="Κύρια πλοήγηση">
           {navItems.map((item) => {
@@ -337,6 +336,7 @@ export default function SpriteHunterApp() {
 
       <main className="main-shell">
         <header className="topbar">
+          <img className="mobile-brand-icon" src="/spritehunter-icon-192.png" alt="" width="34" height="34" />
           <div className="location-control">
             <MapPin size={18} />
             <div><span>Θέση παρατήρησης</span><strong>{observer.name}</strong></div>

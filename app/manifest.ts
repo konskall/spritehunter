@@ -11,6 +11,9 @@ export default function manifest(): MetadataRoute.Manifest {
     theme_color: "#07111d",
     orientation: "any",
     lang: "el",
-    icons: [{ src: "/favicon.svg", sizes: "any", type: "image/svg+xml", purpose: "maskable" }],
+    icons: [
+      { src: "/spritehunter-icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+      { src: "/spritehunter-icon-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+    ],
   };
 }
