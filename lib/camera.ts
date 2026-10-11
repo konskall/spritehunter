@@ -12,14 +12,27 @@ export const CANON_750D: CameraProfile = {
 };
 
 export const DEFAULT_LENSES: LensProfile[] = [
-  { id: "jupiter-21m", name: "Jupiter-21M 200mm f/4", focalLengthMm: 200, maxAperture: 4, mount: "M42 adapter", owned: true },
-  { id: "generic-16", name: "Generic 16mm f/2", focalLengthMm: 16, maxAperture: 2, mount: "Canon EF/EF-S", owned: false },
-  { id: "generic-24", name: "Generic 24mm f/1.4", focalLengthMm: 24, maxAperture: 1.4, mount: "Canon EF/EF-S", owned: false },
-  { id: "sigma-18-35", name: "Sigma 18–35mm f/1.8 DC HSM", focalLengthMm: 24, maxAperture: 1.8, mount: "Canon EF", owned: false },
-  { id: "generic-35", name: "Generic 35mm f/1.8", focalLengthMm: 35, maxAperture: 1.8, mount: "Canon EF/EF-S", owned: false },
-  { id: "generic-50", name: "Generic 50mm f/1.8", focalLengthMm: 50, maxAperture: 1.8, mount: "Canon EF/EF-S", owned: false },
-  { id: "generic-11-20", name: "Generic 11–20mm f/2.8", focalLengthMm: 16, maxAperture: 2.8, mount: "Canon EF-S", owned: false },
+  { id: "tokina-atxi-11-16", name: "Tokina atx-i 11–16mm F2.8 CF", focalLengthMm: 11, minFocalLengthMm: 11, maxFocalLengthMm: 16, maxAperture: 2.8, mount: "Canon EF/EF-S", owned: true },
+  { id: "sigma-17-70-c013", name: "Sigma 17–70mm F2.8–4 DC Macro OS HSM Contemporary (013)", focalLengthMm: 17, minFocalLengthMm: 17, maxFocalLengthMm: 70, maxAperture: 2.8, maxApertureTele: 4, mount: "Canon EF/EF-S", owned: true },
+  { id: "canon-efs-18-55-stm", name: "Canon EF-S 18–55mm F3.5–5.6 IS STM", focalLengthMm: 18, minFocalLengthMm: 18, maxFocalLengthMm: 55, maxAperture: 3.5, maxApertureTele: 5.6, mount: "Canon EF-S", owned: true },
+  { id: "canon-efs-24-stm", name: "Canon EF-S 24mm F2.8 STM", focalLengthMm: 24, maxAperture: 2.8, mount: "Canon EF-S", owned: true },
+  { id: "canon-ef-50-stm", name: "Canon EF 50mm F1.8 STM", focalLengthMm: 50, maxAperture: 1.8, mount: "Canon EF", owned: true },
+  { id: "helios-44-2", name: "Helios 44-2 58mm F2", focalLengthMm: 58, maxAperture: 2, mount: "M42 → Canon EF (adapter)", owned: true },
+  { id: "jupiter-21m", name: "Jupiter-21M 200mm F4", focalLengthMm: 200, maxAperture: 4, mount: "M42 → Canon EF (adapter)", owned: true },
+  { id: "canon-efs-55-250-stm", name: "Canon EF-S 55–250mm F4–5.6 IS STM", focalLengthMm: 55, minFocalLengthMm: 55, maxFocalLengthMm: 250, maxAperture: 4, maxApertureTele: 5.6, mount: "Canon EF-S", owned: true },
 ];
+
+export function effectiveMaxAperture(lens: LensProfile) {
+  if (
+    lens.minFocalLengthMm === undefined ||
+    lens.maxFocalLengthMm === undefined ||
+    lens.maxApertureTele === undefined ||
+    lens.maxFocalLengthMm === lens.minFocalLengthMm
+  ) return lens.maxAperture;
+
+  const progress = Math.min(1, Math.max(0, (lens.focalLengthMm - lens.minFocalLengthMm) / (lens.maxFocalLengthMm - lens.minFocalLengthMm)));
+  return Math.round((lens.maxAperture + (lens.maxApertureTele - lens.maxAperture) * progress) * 10) / 10;
+}
 
 export function fieldOfView(camera: CameraProfile, focalLengthMm: number, orientation: "landscape" | "portrait" = "landscape") {
   const width = orientation === "landscape" ? camera.sensorWidthMm : camera.sensorHeightMm;
@@ -47,10 +60,11 @@ export function framingAssessment(
 
 export function photoRecommendation(lens: LensProfile, moonInterference: boolean, uncertaintyDeg: number) {
   const narrow = lens.focalLengthMm >= 85;
+  const aperture = effectiveMaxAperture(lens);
   return {
     preset: narrow ? "Στοχευμένη λήψη μακρινής καταιγίδας" : "Ευρυγώνια αναζήτηση sprites",
-    aperture: `f/${lens.maxAperture}`,
-    iso: moonInterference ? "ISO 1600–3200" : lens.maxAperture <= 2 ? "ISO 1600–3200" : "ISO 3200–6400",
+    aperture: `f/${aperture}`,
+    iso: moonInterference ? "ISO 1600–3200" : aperture <= 2 ? "ISO 1600–3200" : "ISO 3200–6400",
     shutter: moonInterference ? "1–2 s" : "2–4 s",
     whiteBalance: "3.500–4.500 K",
     format: "RAW",
@@ -61,4 +75,3 @@ export function photoRecommendation(lens: LensProfile, moonInterference: boolean
         : "Το κάδρο καλύπτει την αρχική αναζήτηση· έλεγχε συχνά την κίνηση της καταιγίδας.",
   };
 }
-

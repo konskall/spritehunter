@@ -162,7 +162,10 @@ export interface LensProfile {
   id: string;
   name: string;
   focalLengthMm: number;
+  minFocalLengthMm?: number;
+  maxFocalLengthMm?: number;
   maxAperture: number;
+  maxApertureTele?: number;
   mount: string;
   owned: boolean;
 }

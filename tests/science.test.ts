@@ -7,7 +7,7 @@ import {
   inverseGeodesic,
   lookAngles,
 } from "@/lib/geodesy";
-import { CANON_750D, fieldOfView, framingAssessment } from "@/lib/camera";
+import { CANON_750D, DEFAULT_LENSES, effectiveMaxAperture, fieldOfView, framingAssessment } from "@/lib/camera";
 import { scoreOpportunity } from "@/lib/scoring";
 import { terrainVisibility } from "@/lib/terrain";
 import { shouldNotify } from "@/lib/notifications";
@@ -77,6 +77,11 @@ describe("terrain visibility", () => {
 });
 
 describe("camera framing", () => {
+  it("loads the eight owned lenses in the equipment list", () => {
+    expect(DEFAULT_LENSES).toHaveLength(8);
+    expect(DEFAULT_LENSES.every((lens) => lens.owned)).toBe(true);
+    expect(DEFAULT_LENSES.map((lens) => lens.id)).toContain("tokina-atxi-11-16");
+  });
   it("calculates Canon 750D field of view", () => {
     const fov = fieldOfView(CANON_750D, 24);
     expect(fov.horizontalDeg).toBeCloseTo(49.8, 1);
@@ -85,6 +90,11 @@ describe("camera framing", () => {
   it("flags a narrow lens for a broad uncertainty sector", () => {
     const fov = fieldOfView(CANON_750D, 200);
     expect(framingAssessment(fov.horizontalDeg, fov.verticalDeg, 12, 2, 9).fits).toBe(false);
+  });
+  it("updates the working aperture estimate across a variable-aperture zoom", () => {
+    const sigma = DEFAULT_LENSES.find((lens) => lens.id === "sigma-17-70-c013")!;
+    expect(effectiveMaxAperture(sigma)).toBe(2.8);
+    expect(effectiveMaxAperture({ ...sigma, focalLengthMm: 70 })).toBe(4);
   });
 });
 
@@ -137,4 +147,3 @@ describe("storm detection, scoring, and notification", () => {
     expect(shouldNotify("2026-01-01T11:50:00Z", now, 60, 60, 80, 60)).toBe(true);
   });
 });
-

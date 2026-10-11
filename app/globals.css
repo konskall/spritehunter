@@ -333,6 +333,7 @@ input[type="range"] { padding: 0; accent-color: var(--red); }
 .info-strip { padding: 10px 12px; border: 1px solid rgba(109,184,232,.2); border-radius: 9px; background: rgba(109,184,232,.06); color: #b9d9ed; font-size: 9px; }
 
 .equipment-grid { grid-template-columns: minmax(0, 1.2fr) minmax(310px, .8fr); }
+.panel-subtitle { margin: 5px 0 0; color: var(--subtle); font-size: 8px; text-transform: uppercase; letter-spacing: .08em; }
 .lens-list { display: grid; gap: 7px; }
 .lens-list > div { display: grid; grid-template-columns: 1fr auto; align-items: center; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .lens-list > div.selected { border-color: rgba(240,67,98,.42); box-shadow: inset 2px 0 var(--red); }
@@ -341,6 +342,12 @@ input[type="range"] { padding: 0; accent-color: var(--red); }
 .lens-list strong, .lens-list small { display: block; }
 .lens-list strong { font-size: 10px; } .lens-list small { color: var(--subtle); font-size: 8px; margin-top: 3px; }
 .lens-list label { color: var(--subtle); font-size: 8px; padding: 0 8px; white-space: nowrap; }
+.zoom-control { grid-column: 1 / -1; display: grid; grid-template-columns: 120px minmax(120px, 1fr); align-items: center; gap: 7px 14px; padding: 10px 12px 12px; border-top: 1px solid var(--line); background: rgba(81, 225, 196, .035); }
+.zoom-control > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.zoom-control span { color: var(--subtle); font-size: 8px; text-transform: uppercase; letter-spacing: .05em; }
+.zoom-control strong { color: var(--mint); font: 600 10px ui-monospace, monospace; white-space: nowrap; }
+.zoom-control input { width: 100%; }
+.zoom-control > small { grid-column: 1 / -1; margin: 0; }
 .custom-lens { display: grid; grid-template-columns: 1fr 90px 85px auto; gap: 7px; margin-top: 15px; }
 .custom-lens h3 { grid-column: 1 / -1; font-size: 10px; margin: 0; }
 .custom-lens button, .export-actions button { border: 1px solid var(--line); background: #173044; border-radius: 8px; display: inline-flex; align-items: center; gap: 5px; padding: 0 10px; font-size: 9px; cursor: pointer; }

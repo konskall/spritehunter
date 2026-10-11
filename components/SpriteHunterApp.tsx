@@ -47,7 +47,7 @@ import type {
   StormCandidate,
   TerrainProfile,
 } from "@/lib/domain";
-import { CANON_750D, DEFAULT_LENSES, fieldOfView, framingAssessment, photoRecommendation } from "@/lib/camera";
+import { CANON_750D, DEFAULT_LENSES, effectiveMaxAperture, fieldOfView, framingAssessment, photoRecommendation } from "@/lib/camera";
 import { angularDifference, inverseGeodesic } from "@/lib/geodesy";
 import { skyState } from "@/lib/astronomy";
 import { terrainVisibility } from "@/lib/terrain";
@@ -202,8 +202,8 @@ export default function SpriteHunterApp() {
   const [language, setLanguage] = usePersistedState<Language>("spritehunter.language", "el");
   const [locations, setLocations] = usePersistedState<SavedLocation[]>("spritehunter.locations", [DEFAULT_LOCATION]);
   const [observer, setObserver] = usePersistedState<SavedLocation>("spritehunter.observer", DEFAULT_LOCATION);
-  const [lenses, setLenses] = usePersistedState<LensProfile[]>("spritehunter.lenses", DEFAULT_LENSES);
-  const [selectedLensId, setSelectedLensId] = usePersistedState("spritehunter.selected-lens", "generic-24");
+  const [lenses, setLenses] = usePersistedState<LensProfile[]>("spritehunter.lenses.v2", DEFAULT_LENSES);
+  const [selectedLensId, setSelectedLensId] = usePersistedState("spritehunter.selected-lens.v2", "tokina-atxi-11-16");
   const [orientation, setOrientation] = usePersistedState<"landscape" | "portrait">("spritehunter.orientation", "landscape");
   const [logs, setLogs] = usePersistedState<LogEntry[]>("spritehunter.logs", []);
   const [range, setRange] = usePersistedState("spritehunter.range", { min: 200, max: 600 });
@@ -612,11 +612,63 @@ function CameraView({ candidate, lenses, selectedLens, fov, framing, orientation
   const [custom, setCustom] = useState({ name: "", focal: 24, aperture: 2.8 });
   const recommendation = photoRecommendation(selectedLens, sky?.moonInterference ?? false, candidate ? (Math.atan2(candidate.uncertaintyKm, candidate.distanceKm) * 360) / Math.PI : 10);
   const addLens = (event: FormEvent) => { event.preventDefault(); if (!custom.name.trim() || custom.focal <= 0 || custom.aperture <= 0) return; const lens: LensProfile = { id: crypto.randomUUID(), name: custom.name, focalLengthMm: custom.focal, maxAperture: custom.aperture, mount: "Canon EF/EF-S", owned: true }; onLenses([...lenses, lens]); onSelect(lens.id); setCustom({ name: "", focal: 24, aperture: 2.8 }); };
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">PHOTOGRAPHY ENGINE</span><h1>Κάμερα & φακοί</h1><p>Canon EOS 750D · APS-C 22,3 × 14,9 mm · crop 1,6×</p></div><Camera size={31} /></div><div className="equipment-grid"><section className="panel lens-library"><div className="panel-heading"><h2>Συλλογή φακών</h2><div className="segmented"><button className={orientation === "landscape" ? "active" : ""} onClick={() => onOrientation("landscape")}>Οριζόντια</button><button className={orientation === "portrait" ? "active" : ""} onClick={() => onOrientation("portrait")}>Κάθετα</button></div></div><div className="lens-list">{lenses.map((lens) => <div key={lens.id} className={lens.id === selectedLens.id ? "selected" : ""}><button onClick={() => onSelect(lens.id)}><span><strong>{lens.name}</strong><small>{lens.mount} · {lens.owned ? "Δηλωμένος ως διαθέσιμος" : "Πρόταση — όχι δηλωμένος ως διαθέσιμος"}</small></span><span>{lens.focalLengthMm} mm<br /><small>f/{lens.maxAperture}</small></span></button><label><input type="checkbox" checked={lens.owned} onChange={(event) => onLenses(lenses.map((item) => item.id === lens.id ? { ...item, owned: event.target.checked } : item))} /> δικός μου</label></div>)}</div><form className="custom-lens" onSubmit={addLens}><h3>Προσθήκη φακού</h3><input placeholder="Όνομα" value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} /><input type="number" aria-label="Εστιακή απόσταση" value={custom.focal} onChange={(event) => setCustom({ ...custom, focal: Number(event.target.value) })} /><input type="number" step="0.1" aria-label="Μέγιστο διάφραγμα" value={custom.aperture} onChange={(event) => setCustom({ ...custom, aperture: Number(event.target.value) })} /><button><Plus size={16} />Προσθήκη</button></form></section><aside className="view-stack"><section className="panel fov-card"><span className="eyebrow">CALCULATED FIELD OF VIEW</span><div className="big-fov"><strong>{fov.horizontalDeg.toFixed(1)}° × {fov.verticalDeg.toFixed(1)}°</strong><span>πραγματικό γωνιακό κάδρο</span></div>{candidate && <div className={framing?.fits ? "fit-ok" : "fit-warn"}>{framing?.fits ? <Check size={17} /> : <AlertTriangle size={17} />}{framing?.fits ? "Ο στόχος και η αβεβαιότητά του χωρούν." : "Ο στόχος μπορεί να βγει από το κάδρο."}</div>}<p className="data-note">Ο Jupiter 200 mm είναι πολύ στενός και σχετικά αργός για αρχική αναζήτηση sprites, εκτός αν η περιοχή έχει επιβεβαιωθεί πολύ καλά.</p></section><section className="panel recommendation-card"><span className="eyebrow">EXPERIMENTAL STARTING POINT</span><h2>{recommendation.preset}</h2><div className="settings-grid"><Metric icon={Camera} label="Διάφραγμα" value={recommendation.aperture} /><Metric icon={Gauge} label="Ευαισθησία" value={recommendation.iso} /><Metric icon={Activity} label="Έκθεση" value={recommendation.shutter} /><Metric icon={Moon} label="Ισορροπία λευκού" value={recommendation.whiteBalance} /></div><div className="warning-box"><AlertTriangle size={17} /><p>{recommendation.warning} Οι ρυθμίσεις είναι πειραματική αφετηρία, όχι εγγύηση.</p></div></section></aside></div></div>;
+  return (
+    <div className="view-stack">
+      <div className="view-heading">
+        <div><span className="eyebrow">PHOTOGRAPHY ENGINE</span><h1>Κάμερα & φακοί</h1><p>Canon EOS 750D · APS-C 22,3 × 14,9 mm · crop 1,6×</p></div>
+        <Camera size={31} />
+      </div>
+      <div className="equipment-grid">
+        <section className="panel lens-library">
+          <div className="panel-heading">
+            <div><h2>Ο εξοπλισμός μου</h2><p className="panel-subtitle">{lenses.length} φακοί · {lenses.filter((lens) => lens.owned).length} διαθέσιμοι</p></div>
+            <div className="segmented"><button className={orientation === "landscape" ? "active" : ""} onClick={() => onOrientation("landscape")}>Οριζόντια</button><button className={orientation === "portrait" ? "active" : ""} onClick={() => onOrientation("portrait")}>Κάθετα</button></div>
+          </div>
+          <div className="lens-list">
+            {lenses.map((lens) => {
+              const isSelected = lens.id === selectedLens.id;
+              const isZoom = lens.minFocalLengthMm !== undefined && lens.maxFocalLengthMm !== undefined;
+              const focalRange = isZoom ? `${lens.minFocalLengthMm}–${lens.maxFocalLengthMm} mm` : `${lens.focalLengthMm} mm`;
+              const apertureRange = lens.maxApertureTele !== undefined ? `f/${lens.maxAperture}–${lens.maxApertureTele}` : `f/${lens.maxAperture}`;
+              return (
+                <div key={lens.id} className={isSelected ? "selected" : ""}>
+                  <button onClick={() => onSelect(lens.id)}>
+                    <span><strong>{lens.name}</strong><small>{lens.mount} · {lens.owned ? "Διαθέσιμος" : "Μη διαθέσιμος"}</small></span>
+                    <span>{focalRange}<br /><small>{apertureRange}</small></span>
+                  </button>
+                  <label><input type="checkbox" checked={lens.owned} onChange={(event) => onLenses(lenses.map((item) => item.id === lens.id ? { ...item, owned: event.target.checked } : item))} /> δικός μου</label>
+                  {isSelected && isZoom && (
+                    <div className="zoom-control">
+                      <div><span>Ενεργή εστιακή</span><strong>{lens.focalLengthMm} mm</strong></div>
+                      <input
+                        type="range"
+                        min={lens.minFocalLengthMm}
+                        max={lens.maxFocalLengthMm}
+                        step="1"
+                        value={lens.focalLengthMm}
+                        aria-label={`Ενεργή εστιακή απόσταση για ${lens.name}`}
+                        onChange={(event) => onLenses(lenses.map((item) => item.id === lens.id ? { ...item, focalLengthMm: Number(event.target.value) } : item))}
+                      />
+                      <small>Μέγιστο διάφραγμα στην τρέχουσα θέση: περίπου f/{effectiveMaxAperture(lens)}</small>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <form className="custom-lens" onSubmit={addLens}><h3>Προσθήκη φακού</h3><input placeholder="Όνομα" value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} /><input type="number" aria-label="Εστιακή απόσταση" value={custom.focal} onChange={(event) => setCustom({ ...custom, focal: Number(event.target.value) })} /><input type="number" step="0.1" aria-label="Μέγιστο διάφραγμα" value={custom.aperture} onChange={(event) => setCustom({ ...custom, aperture: Number(event.target.value) })} /><button><Plus size={16} />Προσθήκη</button></form>
+        </section>
+        <aside className="view-stack">
+          <section className="panel fov-card"><span className="eyebrow">CALCULATED FIELD OF VIEW</span><div className="big-fov"><strong>{fov.horizontalDeg.toFixed(1)}° × {fov.verticalDeg.toFixed(1)}°</strong><span>πραγματικό γωνιακό κάδρο στα {selectedLens.focalLengthMm} mm</span></div>{candidate && <div className={framing?.fits ? "fit-ok" : "fit-warn"}>{framing?.fits ? <Check size={17} /> : <AlertTriangle size={17} />}{framing?.fits ? "Ο στόχος και η αβεβαιότητά του χωρούν." : "Ο στόχος μπορεί να βγει από το κάδρο."}</div>}<p className="data-note">Για αρχική αναζήτηση sprites ξεκίνα με τον Tokina στα 11 mm. Ο Jupiter 200 mm είναι κατάλληλος μόνο όταν η περιοχή έχει επιβεβαιωθεί πολύ καλά.</p></section>
+          <section className="panel recommendation-card"><span className="eyebrow">EXPERIMENTAL STARTING POINT</span><h2>{recommendation.preset}</h2><div className="settings-grid"><Metric icon={Camera} label="Διάφραγμα" value={recommendation.aperture} /><Metric icon={Gauge} label="Ευαισθησία" value={recommendation.iso} /><Metric icon={Activity} label="Έκθεση" value={recommendation.shutter} /><Metric icon={Moon} label="Ισορροπία λευκού" value={recommendation.whiteBalance} /></div><div className="warning-box"><AlertTriangle size={17} /><p>{recommendation.warning} Οι ρυθμίσεις είναι πειραματική αφετηρία, όχι εγγύηση.</p></div></section>
+        </aside>
+      </div>
+    </div>
+  );
 }
 
 function LogbookView({ logs, candidate, lens, onLogs }: { logs: LogEntry[]; candidate: StormCandidate | null; lens: LensProfile; onLogs: (value: LogEntry[]) => void }) {
-  const [form, setForm] = useState({ tleType: "Red Sprite", iso: 3200, aperture: lens.maxAperture, shutter: "3 s", success: "uncertain" as LogEntry["success"], notes: "" });
+  const [form, setForm] = useState({ tleType: "Red Sprite", iso: 3200, aperture: effectiveMaxAperture(lens), shutter: "3 s", success: "uncertain" as LogEntry["success"], notes: "" });
   const add = (event: FormEvent) => { event.preventDefault(); onLogs([{ id: crypto.randomUUID(), timestamp: new Date().toISOString(), target: candidate ? `${candidate.bearingDeg.toFixed(1)}° / ${candidate.distanceKm.toFixed(0)} km` : "Χωρίς στόχο", lens: lens.name, ...form }, ...logs]); setForm({ ...form, notes: "" }); };
   const download = (format: "json" | "csv") => {
     const content = format === "json" ? JSON.stringify(logs, null, 2) : ["timestamp,target,tleType,lens,iso,aperture,shutter,success,notes", ...logs.map((entry) => [entry.timestamp, entry.target, entry.tleType, entry.lens, entry.iso, entry.aperture, entry.shutter, entry.success, entry.notes].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","))].join("\n");
