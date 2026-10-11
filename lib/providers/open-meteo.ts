@@ -32,6 +32,10 @@ const weatherSchema = z.object({
     cape: numberArray.optional(),
     weather_code: numberArray.optional(),
   }),
+  minutely_15: z.object({
+    time: z.array(z.string()),
+    lightning_potential: numberArray.optional(),
+  }).optional(),
 });
 
 const airSchema = z.object({
@@ -112,10 +116,25 @@ function weatherUrl(points: Coordinates[]) {
     latitude: points.map((point) => point.latitude.toFixed(5)).join(","),
     longitude: points.map((point) => point.longitude.toFixed(5)).join(","),
     hourly: WEATHER_VARIABLES.join(","),
+    minutely_15: "lightning_potential",
+    forecast_minutely_15: String(FORECAST_HOURS * 4),
     forecast_hours: String(FORECAST_HOURS),
     timezone: "UTC",
   });
   return `https://api.open-meteo.com/v1/forecast?${params}`;
+}
+
+function lightningPotentialAt(payload: WeatherPayload, time: string) {
+  const series = payload.minutely_15;
+  if (!series?.lightning_potential?.length) return null;
+  const target = new Date(time).getTime();
+  let closestIndex = -1;
+  let closestDistance = Number.POSITIVE_INFINITY;
+  series.time.forEach((value, index) => {
+    const distance = Math.abs(new Date(value).getTime() - target);
+    if (distance < closestDistance) { closestDistance = distance; closestIndex = index; }
+  });
+  return closestIndex >= 0 ? series.lightning_potential[closestIndex] ?? null : null;
 }
 
 function parseWeatherPayloads(raw: unknown): WeatherPayload[] {
@@ -169,6 +188,7 @@ function candidateFromPoint(
   const cape = valid.hour.capeJkg ?? 0;
   const precipitation = valid.hour.precipitationMm ?? 0;
   const thunderCode = valid.hour.weatherCode != null && [95, 96, 99].includes(valid.hour.weatherCode);
+  const lightningPotentialJkg = lightningPotentialAt(target, valid.hour.time);
   if (!thunderCode && !(cape >= 250 && precipitation >= 0.2) && cape < 600) return null;
 
   const coordinates: Coordinates = {
@@ -184,6 +204,7 @@ function candidateFromPoint(
     capeJkg: valid.hour.capeJkg,
     precipitationMm: valid.hour.precipitationMm,
     thunderCode,
+    lightningPotentialJkg,
     observerCloudPercent: observerHour?.cloudCover ?? null,
     observerHighCloudPercent: observerHour?.cloudCoverHigh ?? null,
     visibilityM: observerHour?.visibilityM ?? null,
@@ -205,6 +226,7 @@ function candidateFromPoint(
     capeJkg: valid.hour.capeJkg,
     precipitationMm: valid.hour.precipitationMm,
     weatherCode: valid.hour.weatherCode,
+    lightningPotentialJkg,
     highCloudPercent: valid.hour.cloudCoverHigh,
     windSpeedKmh: valid.hour.windSpeedKmh,
     windDirectionDeg: valid.hour.windDirectionDeg,
@@ -269,6 +291,7 @@ export async function fetchOpportunities(
 
   const xweatherConfigured = typeof process !== "undefined" && Boolean(process.env.XWEATHER_CLIENT_ID && process.env.XWEATHER_CLIENT_SECRET);
   const screeningStatus = screeningFailures === 0 ? "available" : screenedPayloads.length ? "stale" : "unavailable";
+  const hasLightningPotential = candidates.some((candidate) => candidate.lightningPotentialJkg != null);
   const screeningMessage = screeningFailures === 0
     ? `Observer forecast and ${screenedPayloads.length} Mediterranean screening cells available.`
     : `Observer forecast available; ${screenedPayloads.length}/${grid.length} screening cells returned (${screeningFailures} batch failures).`;
@@ -280,6 +303,15 @@ export async function fetchOpportunities(
     candidates,
     providers: [
       { id: "open_meteo", label: "Open-Meteo Forecast", status: screeningStatus, checkedAt: fetchedAt, message: screeningMessage },
+      {
+        id: "open_meteo_lpi",
+        label: "Open-Meteo lightning potential",
+        status: hasLightningPotential ? "available" : "unsupported",
+        checkedAt: fetchedAt,
+        message: hasLightningPotential
+          ? "Δωρεάν προγνωστικός δείκτης μοντέλου (J/kg) — όχι παρατηρημένα χτυπήματα κεραυνών."
+          : "Δεν υποστηρίζεται από το επιλεγμένο μοντέλο/την περιοχή· δεν αντικαθίσταται με τεχνητές τιμές.",
+      },
       {
         id: "air_quality",
         label: "Open-Meteo Air Quality",
@@ -293,7 +325,7 @@ export async function fetchOpportunities(
         label: "Vaisala Xweather lightning",
         status: xweatherConfigured ? "available" : "not_configured",
         checkedAt: fetchedAt,
-        message: xweatherConfigured ? "Credentials configured; queries are limited to selected candidate regions." : "No paid lightning-provider credentials configured.",
+        message: xweatherConfigured ? "Credentials configured; queries are limited to selected candidate regions." : "Προαιρετικός πάροχος πραγματικών χτυπημάτων· δεν έχουν οριστεί επί πληρωμή διαπιστευτήρια.",
       },
       { id: "terrain", label: "OpenTopoData SRTM", status: "available", checkedAt: fetchedAt, message: "Terrain is requested on demand for the selected bearing to conserve the public quota." },
     ],

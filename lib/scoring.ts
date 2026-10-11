@@ -5,6 +5,7 @@ interface ScoreInput {
   capeJkg: number | null;
   precipitationMm: number | null;
   thunderCode: boolean;
+  lightningPotentialJkg?: number | null;
   observerCloudPercent: number | null;
   observerHighCloudPercent: number | null;
   visibilityM: number | null;
@@ -23,6 +24,8 @@ export function scoreOpportunity(input: ScoreInput): ScoreBreakdown {
   const cape = input.capeJkg ?? 0;
   const precipitation = input.precipitationMm ?? 0;
   let activity = clamp(cape / 90, 0, 18) + clamp(precipitation * 1.7, 0, 5) + (input.thunderCode ? 4 : 0);
+  const lightningPotential = input.lightningPotentialJkg ?? 0;
+  activity += clamp(lightningPotential / 80, 0, 6);
   if (input.lightning === "observed") activity = clamp(activity + 8, 0, 35);
   else {
     activity = Math.min(activity, 27);
@@ -31,6 +34,7 @@ export function scoreOpportunity(input: ScoreInput): ScoreBreakdown {
 
   if (cape >= 800) reasons.push("Ισχυρό προγνωστικό σήμα αστάθειας (CAPE).");
   else if (cape >= 300) reasons.push("Μέτριο προγνωστικό σήμα αστάθειας.");
+  if (lightningPotential >= 100) reasons.push("Το αριθμητικό μοντέλο δείχνει αυξημένο προγνωστικό lightning potential.");
 
   const cloud = input.observerCloudPercent ?? 65;
   const highCloud = input.observerHighCloudPercent ?? cloud;
@@ -80,4 +84,3 @@ export function scoreOpportunity(input: ScoreInput): ScoreBreakdown {
     limitations,
   };
 }
-

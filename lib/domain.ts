@@ -80,6 +80,7 @@ export interface StormCandidate {
   capeJkg: number | null;
   precipitationMm: number | null;
   weatherCode: number | null;
+  lightningPotentialJkg: number | null;
   highCloudPercent: number | null;
   windSpeedKmh: number | null;
   windDirectionDeg: number | null;
@@ -90,10 +91,22 @@ export interface StormCandidate {
 }
 
 export interface ProviderHealth {
-  id: "open_meteo" | "air_quality" | "rainviewer" | "xweather" | "terrain";
+  id: "open_meteo" | "open_meteo_lpi" | "air_quality" | "rainviewer" | "xweather" | "terrain";
   label: string;
   status: DataStatus;
   checkedAt: string;
+  message: string;
+}
+
+export interface AuroraResponse {
+  status: DataStatus;
+  retrievedAt: string;
+  observationTime: string | null;
+  forecastTime: string | null;
+  kp: number | null;
+  localProbabilityPercent: number | null;
+  northernSectorProbabilityPercent: number | null;
+  level: "quiet" | "elevated" | "possible" | "strong" | "unknown";
   message: string;
 }
 
@@ -153,4 +166,3 @@ export interface LensProfile {
   mount: string;
   owned: boolean;
 }
-
