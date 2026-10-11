@@ -231,9 +231,30 @@ export default function SpriteHunterApp() {
       const params = new URLSearchParams({
         lat: observer.latitude.toString(), lon: observer.longitude.toString(), elevation: String(observer.elevationM ?? 0), minKm: String(range.min), maxKm: String(range.max),
       });
-      const response = await fetch(`/api/opportunities?${params}`);
-      const payload = (await response.json()) as OpportunityResponse & { error?: string };
-      if (!response.ok) throw new Error(payload.error ?? "Αποτυχία ανάκτησης μετεωρολογικών δεδομένων.");
+      let payload: OpportunityResponse;
+      try {
+        const response = await fetch(`/api/opportunities?${params}`);
+        const serverPayload = (await response.json()) as OpportunityResponse & { error?: string };
+        if (!response.ok) throw new Error(serverPayload.error ?? "Αποτυχία ανάκτησης μετεωρολογικών δεδομένων.");
+        payload = serverPayload;
+      } catch (serverError) {
+        const { fetchOpportunities } = await import("@/lib/providers/open-meteo");
+        const directPayload = await fetchOpportunities(
+          { latitude: observer.latitude, longitude: observer.longitude, elevationM: observer.elevationM },
+          range.min,
+          range.max,
+        );
+        payload = {
+          ...directPayload,
+          providers: directPayload.providers.map((provider) => provider.id === "open_meteo"
+            ? { ...provider, message: `${provider.message} Άμεση σύνδεση browser μετά από σφάλμα του server.` }
+            : provider),
+          warnings: [
+            ...directPayload.warnings,
+            `Το server API δεν απάντησε· χρησιμοποιήθηκε ασφαλές browser fallback χωρίς κλειδί API (${serverError instanceof Error ? serverError.message : "άγνωστο σφάλμα"}).`,
+          ],
+        };
+      }
       setData(payload);
       setSelectedId((current) => payload.candidates.some((candidate) => candidate.id === current) ? current : payload.candidates[0]?.id ?? null);
     } catch (refreshError) {

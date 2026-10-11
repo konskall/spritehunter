@@ -22,6 +22,20 @@ interface StormMapProps {
   onSelect: (id: string) => void;
 }
 
+function syncRadarLayer(map: MapLibreMap, radar: RadarMetadata | null, visible: boolean) {
+  if (!map.isStyleLoaded()) return;
+  const existing = map.getSource("radar") as RasterTileSource | undefined;
+  const latest = radar?.radar.past.at(-1);
+  const tiles = radar && latest ? [`${radar.host}${latest.path}/256/{z}/{x}/{y}/2/1_1.png`] : null;
+  if (!existing && tiles) {
+    map.addSource("radar", { type: "raster", tiles, tileSize: 256, maxzoom: 7 });
+    map.addLayer({ id: "radar", type: "raster", source: "radar", paint: { "raster-opacity": visible ? 0.52 : 0, "raster-fade-duration": 250 } }, "uncertainty-fill");
+  } else if (existing && tiles) {
+    existing.setTiles(tiles);
+    map.setPaintProperty("radar", "raster-opacity", visible ? 0.52 : 0);
+  }
+}
+
 function circleLine(center: Coordinates, radiusKm: number): Feature<LineString> {
   const coordinates = Array.from({ length: 73 }, (_, index) => {
     const point = destinationPoint(center, radiusKm, index * 5);
@@ -83,11 +97,15 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const onSelectRef = useRef(onSelect);
+  const radarRef = useRef(radar);
+  const radarVisibleRef = useRef(radarVisible);
   const data = useMemo(() => sourceData(observer, candidates, selectedId, ringsVisible), [observer, candidates, selectedId, ringsVisible]);
   const dataRef = useRef(data);
   const initialObserverRef = useRef(observer);
 
   useEffect(() => { onSelectRef.current = onSelect; }, [onSelect]);
+  useEffect(() => { radarRef.current = radar; }, [radar]);
+  useEffect(() => { radarVisibleRef.current = radarVisible; }, [radarVisible]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -100,14 +118,14 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
       style: {
         version: 8,
         sources: {
-          osm: {
+          basemap: {
             type: "raster",
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tiles: ["https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"],
             tileSize: 256,
-            attribution: "© OpenStreetMap contributors",
+            attribution: "© OpenStreetMap contributors © CARTO",
           },
         },
-        layers: [{ id: "osm", type: "raster", source: "osm", paint: { "raster-saturation": -0.8, "raster-brightness-max": 0.56, "raster-contrast": 0.18 } }],
+        layers: [{ id: "basemap", type: "raster", source: "basemap", paint: { "raster-saturation": -0.55, "raster-brightness-max": 0.72, "raster-contrast": 0.1 } }],
       },
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
@@ -131,6 +149,7 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
       (map.getSource("targets") as GeoJSONSource).setData(dataRef.current.points);
       (map.getSource("guides") as GeoJSONSource).setData(dataRef.current.lines);
       (map.getSource("uncertainty") as GeoJSONSource).setData(dataRef.current.polygons);
+      syncRadarLayer(map, radarRef.current, radarVisibleRef.current);
     });
     mapRef.current = map;
     return () => { map.remove(); mapRef.current = null; };
@@ -147,17 +166,7 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map?.isStyleLoaded()) return;
-    const existing = map.getSource("radar") as RasterTileSource | undefined;
-    const latest = radar?.radar.past.at(-1);
-    const tiles = radar && latest ? [`${radar.host}${latest.path}/256/{z}/{x}/{y}/2/1_1.png`] : null;
-    if (!existing && tiles) {
-      map.addSource("radar", { type: "raster", tiles, tileSize: 256, maxzoom: 7 });
-      map.addLayer({ id: "radar", type: "raster", source: "radar", paint: { "raster-opacity": radarVisible ? 0.52 : 0, "raster-fade-duration": 250 } }, "uncertainty-fill");
-    } else if (existing && tiles) {
-      existing.setTiles(tiles);
-      map.setPaintProperty("radar", "raster-opacity", radarVisible ? 0.52 : 0);
-    }
+    if (map) syncRadarLayer(map, radar, radarVisible);
   }, [radar, radarVisible]);
 
   useEffect(() => {

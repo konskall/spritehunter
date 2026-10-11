@@ -46,7 +46,25 @@ const airSchema = z.object({
 
 type WeatherPayload = z.infer<typeof weatherSchema>;
 const CACHE_TTL_MS = 15 * 60_000;
+const FORECAST_HOURS = 72;
+const SCREENING_BATCH_SIZE = 8;
 const opportunityCache = new Map<string, { expires: number; value: OpportunityResponse }>();
+
+const WEATHER_VARIABLES = [
+  "temperature_2m",
+  "relative_humidity_2m",
+  "precipitation",
+  "precipitation_probability",
+  "cloud_cover",
+  "cloud_cover_low",
+  "cloud_cover_mid",
+  "cloud_cover_high",
+  "visibility",
+  "wind_speed_10m",
+  "wind_direction_10m",
+  "cape",
+  "weather_code",
+];
 
 function valueAt(values: Array<number | null> | undefined, index: number) {
   return values?.[index] ?? null;
@@ -86,6 +104,44 @@ function makeScreeningGrid(observer: Coordinates, minimumKm: number, maximumKm: 
   const distances = [minimumKm + span * 0.2, minimumKm + span * 0.55, minimumKm + span * 0.9];
   return distances.flatMap((distanceKm) =>
     Array.from({ length: 8 }, (_, index) => destinationPoint(observer, distanceKm, index * 45)),
+  );
+}
+
+function weatherUrl(points: Coordinates[]) {
+  const params = new URLSearchParams({
+    latitude: points.map((point) => point.latitude.toFixed(5)).join(","),
+    longitude: points.map((point) => point.longitude.toFixed(5)).join(","),
+    hourly: WEATHER_VARIABLES.join(","),
+    forecast_hours: String(FORECAST_HOURS),
+    timezone: "UTC",
+  });
+  return `https://api.open-meteo.com/v1/forecast?${params}`;
+}
+
+function parseWeatherPayloads(raw: unknown): WeatherPayload[] {
+  const parsedBatch = z.array(weatherSchema).safeParse(raw);
+  if (parsedBatch.success) return parsedBatch.data;
+  const parsedSingle = weatherSchema.safeParse(raw);
+  if (parsedSingle.success) return [parsedSingle.data];
+  throw new Error("Open-Meteo returned an unsupported response shape.");
+}
+
+async function fetchWeatherBatch(points: Coordinates[]) {
+  const raw = await fetchJsonWithRetry<unknown>(weatherUrl(points), {
+    retries: 1,
+    timeoutMs: 15_000,
+    headers: { Accept: "application/json" },
+  });
+  const payloads = parseWeatherPayloads(raw);
+  if (payloads.length !== points.length) {
+    throw new Error(`Open-Meteo returned ${payloads.length} of ${points.length} requested locations.`);
+  }
+  return payloads;
+}
+
+function chunks<T>(values: T[], size: number) {
+  return Array.from({ length: Math.ceil(values.length / size) }, (_, index) =>
+    values.slice(index * size, (index + 1) * size),
   );
 }
 
@@ -180,28 +236,6 @@ export async function fetchOpportunities(
   if (cached && cached.expires > Date.now()) return cached.value;
 
   const grid = makeScreeningGrid(observer, minimumKm, maximumKm);
-  const points = [observer, ...grid];
-  const params = new URLSearchParams({
-    latitude: points.map((point) => point.latitude.toFixed(5)).join(","),
-    longitude: points.map((point) => point.longitude.toFixed(5)).join(","),
-    hourly: [
-      "temperature_2m",
-      "relative_humidity_2m",
-      "precipitation",
-      "precipitation_probability",
-      "cloud_cover",
-      "cloud_cover_low",
-      "cloud_cover_mid",
-      "cloud_cover_high",
-      "visibility",
-      "wind_speed_10m",
-      "wind_direction_10m",
-      "cape",
-      "weather_code",
-    ].join(","),
-    forecast_days: "3",
-    timezone: "UTC",
-  });
   const airParams = new URLSearchParams({
     latitude: observer.latitude.toString(),
     longitude: observer.longitude.toString(),
@@ -210,32 +244,34 @@ export async function fetchOpportunities(
     timezone: "UTC",
   });
 
-  const [weatherResult, airResult] = await Promise.allSettled([
-    fetchJsonWithRetry<unknown>(`https://api.open-meteo.com/v1/forecast?${params}`),
+  const screeningBatches = chunks(grid, SCREENING_BATCH_SIZE);
+  const [observerResult, airResult, ...screeningResults] = await Promise.allSettled([
+    fetchWeatherBatch([observer]),
     fetchJsonWithRetry<unknown>(`https://air-quality-api.open-meteo.com/v1/air-quality?${airParams}`),
+    ...screeningBatches.map((batch) => fetchWeatherBatch(batch)),
   ]);
 
-  if (weatherResult.status === "rejected") {
-    throw new Error(`Open-Meteo forecast unavailable: ${weatherResult.reason instanceof Error ? weatherResult.reason.message : "unknown error"}`);
+  if (observerResult.status === "rejected") {
+    throw new Error(`Open-Meteo forecast unavailable: ${observerResult.reason instanceof Error ? observerResult.reason.message : "unknown error"}`);
   }
 
-  const parsedBatch = z.array(weatherSchema).safeParse(weatherResult.value);
-  const parsedSingle = weatherSchema.safeParse(weatherResult.value);
-  const payloads = parsedBatch.success ? parsedBatch.data : parsedSingle.success ? [parsedSingle.data] : null;
-  if (!payloads || payloads.length < 2) throw new Error("Open-Meteo returned an unsupported response shape.");
-
   const fetchedAt = new Date().toISOString();
-  const observerForecast = weatherHours(payloads[0]);
+  const observerForecast = weatherHours(observerResult.value[0]);
+  const screenedPayloads = screeningResults.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+  const screeningFailures = screeningResults.filter((result) => result.status === "rejected").length;
   const airParsed = airResult.status === "fulfilled" ? airSchema.safeParse(airResult.value) : null;
   const airQuality = airParsed?.success ? airHours(airParsed.data) : [];
-  const candidates = payloads
-    .slice(1)
+  const candidates = screenedPayloads
     .map((payload) => candidateFromPoint(observer, payload, observerForecast, fetchedAt))
     .filter((candidate): candidate is StormCandidate => candidate !== null)
     .sort((a, b) => b.score.total - a.score.total)
     .slice(0, 10);
 
-  const xweatherConfigured = Boolean(process.env.XWEATHER_CLIENT_ID && process.env.XWEATHER_CLIENT_SECRET);
+  const xweatherConfigured = typeof process !== "undefined" && Boolean(process.env.XWEATHER_CLIENT_ID && process.env.XWEATHER_CLIENT_SECRET);
+  const screeningStatus = screeningFailures === 0 ? "available" : screenedPayloads.length ? "stale" : "unavailable";
+  const screeningMessage = screeningFailures === 0
+    ? `Observer forecast and ${screenedPayloads.length} Mediterranean screening cells available.`
+    : `Observer forecast available; ${screenedPayloads.length}/${grid.length} screening cells returned (${screeningFailures} batch failures).`;
   const value: OpportunityResponse = {
     observer,
     fetchedAt,
@@ -243,7 +279,7 @@ export async function fetchOpportunities(
     airQuality,
     candidates,
     providers: [
-      { id: "open_meteo", label: "Open-Meteo Forecast", status: "available", checkedAt: fetchedAt, message: "Forecast grid and observer weather available." },
+      { id: "open_meteo", label: "Open-Meteo Forecast", status: screeningStatus, checkedAt: fetchedAt, message: screeningMessage },
       {
         id: "air_quality",
         label: "Open-Meteo Air Quality",
@@ -264,9 +300,9 @@ export async function fetchOpportunities(
     warnings: [
       "Οι υποψήφιοι στόχοι είναι προγνωστικές κυψέλες μοντέλου και όχι παρατηρημένες καταιγίδες.",
       "Ο δείκτης 0–100 είναι ευρετική βαθμολογία ευκαιρίας, όχι ποσοστό πιθανότητας εμφάνισης TLE.",
+      ...(screeningFailures ? ["Μερικά τμήματα της γεωγραφικής σάρωσης δεν απάντησαν. Τα διαθέσιμα δεδομένα εμφανίζονται χωρίς συνθετική συμπλήρωση."] : []),
     ],
   };
   opportunityCache.set(cacheKey, { expires: Date.now() + CACHE_TTL_MS, value });
   return value;
 }
-
