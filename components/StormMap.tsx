@@ -20,6 +20,8 @@ interface StormMapProps {
   radarVisible: boolean;
   lightningVisible: boolean;
   infraredVisible: boolean;
+  cloudTopVisible: boolean;
+  instabilityVisible: boolean;
   ringsVisible: boolean;
   eumetsat: EumetsatMetadata | null;
   onSelect: (id: string) => void;
@@ -61,7 +63,7 @@ function satelliteLabel(eumetsat: EumetsatMetadata | null) {
   return `MTG-LI ${new Intl.DateTimeFormat("el-GR", { timeZone: "Europe/Athens", hour: "2-digit", minute: "2-digit" }).format(new Date(eumetsat.lightningTime))}`;
 }
 
-export default function StormMap({ observer, candidates, selectedId, radar, radarVisible, lightningVisible, infraredVisible, ringsVisible, eumetsat, onSelect }: StormMapProps) {
+export default function StormMap({ observer, candidates, selectedId, radar, radarVisible, lightningVisible, infraredVisible, cloudTopVisible, instabilityVisible, ringsVisible, eumetsat, onSelect }: StormMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerX: number; pointerY: number; centerX: number; centerY: number } | null>(null);
   const pointersRef = useRef(new Map<number, { x: number; y: number }>());
@@ -193,6 +195,8 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
           <div key={tile.key}>
             <img className="map-tile" draggable={false} alt="" src={`https://tile.openstreetmap.org/${zoom}/${tile.x}/${tile.y}.png`} style={{ left: tile.left, top: tile.top }} />
             {infraredVisible && <img className="map-tile satellite-tile" draggable={false} alt="" src={eumetsatTileUrl("infrared", tile.x, tile.y, zoom, eumetsat?.infraredTime)} style={{ left: tile.left, top: tile.top }} />}
+            {cloudTopVisible && <img className="map-tile cloud-top-tile" draggable={false} alt="" src={eumetsatTileUrl("cloudTop", tile.x, tile.y, zoom, eumetsat?.cloudTopTime)} style={{ left: tile.left, top: tile.top }} />}
+            {instabilityVisible && <img className="map-tile instability-tile" draggable={false} alt="" src={eumetsatTileUrl("kIndex", tile.x, tile.y, zoom, eumetsat?.kIndexTime)} style={{ left: tile.left, top: tile.top }} />}
             {radarVisible && radar && radarFrame && <img className="map-tile radar-tile" draggable={false} alt="" src={`${radar.host}${radarFrame.path}/256/${zoom}/${tile.x}/${tile.y}/2/1_1.png`} style={{ left: tile.left, top: tile.top }} />}
             {lightningVisible && <img className="map-tile lightning-tile" draggable={false} alt="" src={eumetsatTileUrl("lightning", tile.x, tile.y, zoom, eumetsat?.lightningTime)} style={{ left: tile.left, top: tile.top }} />}
           </div>

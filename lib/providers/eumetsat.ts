@@ -6,7 +6,12 @@ export const EUMETSAT_CAPABILITIES_URL = `${EUMETSAT_WMS_URL}?service=WMS&versio
 const PRODUCTS = {
   lightning: { layer: "mtg_fd:li_afa", style: "mtg_li_afa" },
   infrared: { layer: "mtg_fd:ir105_hrfi", style: "mtg_fd:mtg_fd_ir105_hrfi_style_01" },
+  cloudTop: { layer: "msg_fes:cth", style: "msg_cth" },
+  kIndex: { layer: "msg_fes:gii_kindex", style: "msg_gii_ki" },
+  liftedIndex: { layer: "msg_fes:gii_liftedindex", style: "msg_gii_li" },
 } as const;
+
+export type EumetsatProduct = keyof typeof PRODUCTS;
 
 function layerSection(xml: string, layerName: string) {
   const marker = `<Name>${layerName}</Name>`;
@@ -26,15 +31,21 @@ function defaultTime(xml: string, layerName: string) {
 export function parseEumetsatCapabilities(xml: string, retrievedAt = new Date().toISOString()): EumetsatMetadata {
   const lightningTime = defaultTime(xml, PRODUCTS.lightning.layer);
   const infraredTime = defaultTime(xml, PRODUCTS.infrared.layer);
-  const available = Boolean(lightningTime || infraredTime);
+  const cloudTopTime = defaultTime(xml, PRODUCTS.cloudTop.layer);
+  const kIndexTime = defaultTime(xml, PRODUCTS.kIndex.layer);
+  const liftedIndexTime = defaultTime(xml, PRODUCTS.liftedIndex.layer);
+  const available = Boolean(lightningTime || infraredTime || cloudTopTime || kIndexTime || liftedIndexTime);
   return {
     status: available ? "available" : "unavailable",
     retrievedAt,
     lightningTime,
     infraredTime,
+    cloudTopTime,
+    kIndexTime,
+    liftedIndexTime,
     message: available
-      ? "EUMETSAT MTG Lightning Imager και υπέρυθρη εικόνα νεφών διαθέσιμα μέσω του δημόσιου EUMETView WMS."
-      : "Τα αναμενόμενα στρώματα MTG δεν βρέθηκαν στο EUMETView WMS.",
+      ? "EUMETSAT MTG-LI, υπέρυθρα νέφη, ύψος κορυφών και δείκτες αστάθειας διαθέσιμα μέσω του δημόσιου EUMETView WMS."
+      : "Τα αναμενόμενα στρώματα EUMETSAT δεν βρέθηκαν στο EUMETView WMS.",
   };
 }
 
@@ -65,7 +76,7 @@ export function webMercatorTileBounds(x: number, y: number, zoom: number) {
   };
 }
 
-export function eumetsatTileUrl(kind: keyof typeof PRODUCTS, x: number, y: number, zoom: number, time?: string | null) {
+export function eumetsatTileUrl(kind: EumetsatProduct, x: number, y: number, zoom: number, time?: string | null) {
   const product = PRODUCTS[kind];
   const bounds = webMercatorTileBounds(x, y, zoom);
   const params = new URLSearchParams({

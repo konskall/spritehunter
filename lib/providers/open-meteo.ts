@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   AirQualityHour,
+  AviationObservation,
   Coordinates,
   OpportunityResponse,
   StormCandidate,
@@ -10,6 +11,8 @@ import { altitudeEnvelope, destinationPoint, inverseGeodesic } from "@/lib/geode
 import { skyState } from "@/lib/astronomy";
 import { scoreOpportunity } from "@/lib/scoring";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
+import { fetchNearestAviationWeather, unavailableAviation } from "@/lib/providers/aviation-weather";
+import { fetchMeteoAlarm, unavailableMeteoAlarm } from "@/lib/providers/meteoalarm";
 
 const numberArray = z.array(z.number().nullable());
 const weatherSchema = z.object({
@@ -30,6 +33,9 @@ const weatherSchema = z.object({
     wind_speed_10m: numberArray.optional(),
     wind_direction_10m: numberArray.optional(),
     cape: numberArray.optional(),
+    convective_inhibition: numberArray.optional(),
+    lifted_index: numberArray.optional(),
+    total_column_integrated_water_vapour: numberArray.optional(),
     weather_code: numberArray.optional(),
   }),
   minutely_15: z.object({
@@ -67,6 +73,9 @@ const WEATHER_VARIABLES = [
   "wind_speed_10m",
   "wind_direction_10m",
   "cape",
+  "convective_inhibition",
+  "lifted_index",
+  "total_column_integrated_water_vapour",
   "weather_code",
 ];
 
@@ -74,9 +83,13 @@ function valueAt(values: Array<number | null> | undefined, index: number) {
   return values?.[index] ?? null;
 }
 
+function utcIso(value: string) {
+  return /(?:Z|[+-]\d\d:\d\d)$/i.test(value) ? value : `${value}Z`;
+}
+
 function weatherHours(payload: WeatherPayload): WeatherHour[] {
   return payload.hourly.time.map((time, index) => ({
-    time,
+    time: utcIso(time),
     temperatureC: valueAt(payload.hourly.temperature_2m, index),
     relativeHumidity: valueAt(payload.hourly.relative_humidity_2m, index),
     precipitationMm: valueAt(payload.hourly.precipitation, index),
@@ -89,13 +102,16 @@ function weatherHours(payload: WeatherPayload): WeatherHour[] {
     windSpeedKmh: valueAt(payload.hourly.wind_speed_10m, index),
     windDirectionDeg: valueAt(payload.hourly.wind_direction_10m, index),
     capeJkg: valueAt(payload.hourly.cape, index),
+    convectiveInhibitionJkg: valueAt(payload.hourly.convective_inhibition, index),
+    liftedIndex: valueAt(payload.hourly.lifted_index, index),
+    precipitableWaterKgM2: valueAt(payload.hourly.total_column_integrated_water_vapour, index),
     weatherCode: valueAt(payload.hourly.weather_code, index),
   }));
 }
 
 function airHours(payload: z.infer<typeof airSchema>): AirQualityHour[] {
   return payload.hourly.time.map((time, index) => ({
-    time,
+    time: utcIso(time),
     pm10: valueAt(payload.hourly.pm10, index),
     pm2_5: valueAt(payload.hourly.pm2_5, index),
     dust: valueAt(payload.hourly.dust, index),
@@ -131,7 +147,7 @@ function lightningPotentialAt(payload: WeatherPayload, time: string) {
   let closestIndex = -1;
   let closestDistance = Number.POSITIVE_INFINITY;
   series.time.forEach((value, index) => {
-    const distance = Math.abs(new Date(value).getTime() - target);
+    const distance = Math.abs(new Date(utcIso(value)).getTime() - target);
     if (distance < closestDistance) { closestDistance = distance; closestIndex = index; }
   });
   return closestIndex >= 0 ? series.lightning_potential[closestIndex] ?? null : null;
@@ -167,14 +183,26 @@ function chunks<T>(values: T[], size: number) {
 function stormSignal(hour: WeatherHour) {
   const cape = hour.capeJkg ?? 0;
   const precipitation = hour.precipitationMm ?? 0;
+  const cinPenalty = Math.min(5, Math.max(0, (hour.convectiveInhibitionJkg ?? 0) - 75) / 35);
+  const liftedBoost = Math.max(0, -(hour.liftedIndex ?? 0)) * 1.4;
+  const moistureBoost = Math.max(0, (hour.precipitableWaterKgM2 ?? 20) - 24) / 4;
   const thunderCode = hour.weatherCode != null && [95, 96, 99].includes(hour.weatherCode);
-  return cape / 80 + precipitation * 2 + (thunderCode ? 8 : 0);
+  return cape / 80 + precipitation * 2 + liftedBoost + moistureBoost + (thunderCode ? 8 : 0) - cinPenalty;
+}
+
+function closestHour(hours: WeatherHour[], time: string) {
+  const target = new Date(time).getTime();
+  return hours.reduce<WeatherHour | null>((closest, hour) => {
+    if (!closest) return hour;
+    return Math.abs(new Date(hour.time).getTime() - target) < Math.abs(new Date(closest.time).getTime() - target) ? hour : closest;
+  }, null);
 }
 
 function candidateFromPoint(
   observer: Coordinates,
   target: WeatherPayload,
   observerHours: WeatherHour[],
+  aviation: AviationObservation,
   fetchedAt: string,
 ): StormCandidate | null {
   const hours = weatherHours(target);
@@ -198,16 +226,24 @@ function candidateFromPoint(
   };
   const geometry = inverseGeodesic(observer, coordinates);
   const pointing = altitudeEnvelope(observer, coordinates);
-  const observerHour = observerHours[valid.index] ?? observerHours[0];
+  const observerHour = closestHour(observerHours, valid.hour.time) ?? observerHours[0];
+  const observationIsRelevant = aviation.status !== "unavailable"
+    && aviation.observedAt != null
+    && (aviation.distanceKm ?? Number.POSITIVE_INFINITY) <= 180
+    && Math.abs(new Date(valid.hour.time).getTime() - new Date(aviation.observedAt).getTime()) <= 3 * 60 * 60_000;
   const sky = skyState(new Date(valid.hour.time), observer.latitude, observer.longitude, geometry.initialBearingDeg);
   const score = scoreOpportunity({
     capeJkg: valid.hour.capeJkg,
+    convectiveInhibitionJkg: valid.hour.convectiveInhibitionJkg,
+    liftedIndex: valid.hour.liftedIndex,
+    precipitableWaterKgM2: valid.hour.precipitableWaterKgM2,
     precipitationMm: valid.hour.precipitationMm,
     thunderCode,
     lightningPotentialJkg,
-    observerCloudPercent: observerHour?.cloudCover ?? null,
-    observerHighCloudPercent: observerHour?.cloudCoverHigh ?? null,
-    visibilityM: observerHour?.visibilityM ?? null,
+    observerCloudPercent: observationIsRelevant ? aviation.cloudCoverPercent : observerHour?.cloudCover ?? null,
+    observerHighCloudPercent: observationIsRelevant ? aviation.cloudCoverPercent : observerHour?.cloudCoverHigh ?? null,
+    visibilityM: observationIsRelevant ? aviation.visibilityM : observerHour?.visibilityM ?? null,
+    atmosphereSource: observationIsRelevant ? "observation" : "forecast",
     distanceKm: geometry.distanceM / 1000,
     sunAltitudeDeg: sky.sunAltitudeDeg,
     moonInterference: sky.moonInterference,
@@ -224,6 +260,9 @@ function candidateFromPoint(
     bearingDeg: Math.round(geometry.initialBearingDeg * 10) / 10,
     uncertaintyKm,
     capeJkg: valid.hour.capeJkg,
+    convectiveInhibitionJkg: valid.hour.convectiveInhibitionJkg,
+    liftedIndex: valid.hour.liftedIndex,
+    precipitableWaterKgM2: valid.hour.precipitableWaterKgM2,
     precipitationMm: valid.hour.precipitationMm,
     weatherCode: valid.hour.weatherCode,
     lightningPotentialJkg,
@@ -267,9 +306,11 @@ export async function fetchOpportunities(
   });
 
   const screeningBatches = chunks(grid, SCREENING_BATCH_SIZE);
-  const [observerResult, airResult, ...screeningResults] = await Promise.allSettled([
+  const [observerResult, airResult, aviationResult, alertResult, ...screeningResults] = await Promise.allSettled([
     fetchWeatherBatch([observer]),
     fetchJsonWithRetry<unknown>(`https://air-quality-api.open-meteo.com/v1/air-quality?${airParams}`),
+    fetchNearestAviationWeather(observer),
+    fetchMeteoAlarm(),
     ...screeningBatches.map((batch) => fetchWeatherBatch(batch)),
   ]);
 
@@ -283,8 +324,14 @@ export async function fetchOpportunities(
   const screeningFailures = screeningResults.filter((result) => result.status === "rejected").length;
   const airParsed = airResult.status === "fulfilled" ? airSchema.safeParse(airResult.value) : null;
   const airQuality = airParsed?.success ? airHours(airParsed.data) : [];
+  const aviation = aviationResult.status === "fulfilled"
+    ? aviationResult.value
+    : unavailableAviation("Η πραγματική παρατήρηση METAR δεν ήταν διαθέσιμη.", fetchedAt);
+  const weatherAlerts = alertResult.status === "fulfilled"
+    ? alertResult.value
+    : unavailableMeteoAlarm("Η επίσημη ροή προειδοποιήσεων δεν ήταν διαθέσιμη.", fetchedAt);
   const candidates = screenedPayloads
-    .map((payload) => candidateFromPoint(observer, payload, observerForecast, fetchedAt))
+    .map((payload) => candidateFromPoint(observer, payload, observerForecast, aviation, fetchedAt))
     .filter((candidate): candidate is StormCandidate => candidate !== null)
     .sort((a, b) => b.score.total - a.score.total)
     .slice(0, 10);
@@ -300,6 +347,8 @@ export async function fetchOpportunities(
     fetchedAt,
     observerForecast,
     airQuality,
+    aviation,
+    weatherAlerts,
     candidates,
     providers: [
       { id: "open_meteo", label: "Open-Meteo Forecast", status: screeningStatus, checkedAt: fetchedAt, message: screeningMessage },
@@ -319,7 +368,9 @@ export async function fetchOpportunities(
         checkedAt: fetchedAt,
         message: airQuality.length ? "CAMS forecast is available." : "Air-quality response was unavailable or unsupported.",
       },
-      { id: "rainviewer", label: "RainViewer radar", status: "available", checkedAt: fetchedAt, message: "Public radar metadata is queried on the map; coverage is best-effort." },
+      { id: "aviation_weather", label: "AviationWeather METAR / TAF", status: aviation.status, checkedAt: fetchedAt, message: aviation.message },
+      { id: "meteoalarm", label: "MeteoAlarm Ελλάδα", status: weatherAlerts.status, checkedAt: fetchedAt, message: weatherAlerts.message },
+      { id: "rainviewer", label: "RainViewer radar", status: "stale", checkedAt: fetchedAt, message: "Η live κατάσταση ελέγχεται χωριστά στον χάρτη· η κάλυψη είναι best-effort και χωρίς SLA." },
       {
         id: "xweather",
         label: "Vaisala Xweather (προαιρετικό)",
@@ -327,7 +378,7 @@ export async function fetchOpportunities(
         checkedAt: fetchedAt,
         message: xweatherConfigured ? "Credentials configured; queries are limited to selected candidate regions." : "Δεν απαιτείται για τον live χάρτη: το δωρεάν MTG-LI καλύπτει τη συνολική δραστηριότητα. Xweather χρειάζεται μόνο για δεδομένα CG/IC, πολικότητας και peak current.",
       },
-      { id: "terrain", label: "OpenTopoData SRTM", status: "available", checkedAt: fetchedAt, message: "Terrain is requested on demand for the selected bearing to conserve the public quota." },
+      { id: "terrain", label: "OpenTopoData SRTM", status: "stale", checkedAt: fetchedAt, message: "Το DEM ελέγχεται μόνο κατά την επιλογή στόχου, ώστε να προστατεύεται το δημόσιο quota." },
     ],
     warnings: [
       "Οι υποψήφιοι στόχοι είναι προγνωστικές κυψέλες μοντέλου και όχι παρατηρημένες καταιγίδες.",

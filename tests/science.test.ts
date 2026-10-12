@@ -16,6 +16,8 @@ import { athensUtcOffsetMinutes, dataFreshness } from "@/lib/time";
 import { skyState } from "@/lib/astronomy";
 import { eumetsatTileUrl, parseEumetsatCapabilities, webMercatorTileBounds } from "@/lib/providers/eumetsat";
 import { clampMapZoom } from "@/components/StormMap";
+import { magneticDeclination, normalizeBearing } from "@/lib/wmm";
+import { parseMeteoAlarmFeed } from "@/lib/providers/meteoalarm";
 
 const sparta = { latitude: 37.075, longitude: 22.43, elevationM: 210 };
 
@@ -107,11 +109,12 @@ describe("interactive map and EUMETSAT layers", () => {
     expect(clampMapZoom(12)).toBe(9);
   });
   it("parses the latest MTG lightning and infrared timestamps", () => {
-    const xml = `<Layer><Name>mtg_fd:li_afa</Name><Dimension name="time" default="2026-10-11T18:15:00Z" /></Layer><Layer><Name>mtg_fd:ir105_hrfi</Name><Dimension name="time" default="2026-10-11T18:10:00Z" /></Layer>`;
+    const xml = `<Layer><Name>mtg_fd:li_afa</Name><Dimension name="time" default="2026-10-11T18:15:00Z" /></Layer><Layer><Name>mtg_fd:ir105_hrfi</Name><Dimension name="time" default="2026-10-11T18:10:00Z" /></Layer><Layer><Name>msg_fes:cth</Name><Dimension name="time" default="2026-10-11T18:00:00Z" /></Layer>`;
     const result = parseEumetsatCapabilities(xml, "2026-10-11T18:16:00Z");
     expect(result.status).toBe("available");
     expect(result.lightningTime).toBe("2026-10-11T18:15:00Z");
     expect(result.infraredTime).toBe("2026-10-11T18:10:00Z");
+    expect(result.cloudTopTime).toBe("2026-10-11T18:00:00Z");
   });
   it("builds a georeferenced transparent WMS tile request", () => {
     const bounds = webMercatorTileBounds(8, 6, 4);
@@ -121,6 +124,21 @@ describe("interactive map and EUMETSAT layers", () => {
     expect(url.searchParams.get("layers")).toBe("mtg_fd:li_afa");
     expect(url.searchParams.get("transparent")).toBe("true");
     expect(url.searchParams.get("time")).toBe("2026-10-11T18:15:00Z");
+  });
+});
+
+describe("WMM2025 heading correction and official alerts", () => {
+  it("matches the NOAA WMM2025 declination for Sparta", () => {
+    const declination = magneticDeclination(37.075, 22.43, 0, new Date("2026-10-11T00:00:00Z"));
+    expect(declination).toBeCloseTo(4.91744, 2);
+    expect(normalizeBearing(358 + declination)).toBeCloseTo(2.91744, 2);
+  });
+
+  it("parses only active MeteoAlarm Atom entries", () => {
+    const xml = `<feed><updated>2026-10-11T18:00:00Z</updated><entry><cap:identifier xmlns:cap="x">active</cap:identifier><cap:areaDesc xmlns:cap="x">Peloponnisos</cap:areaDesc><cap:event xmlns:cap="x">Moderate Thunderstorm warning</cap:event><cap:severity xmlns:cap="x">Moderate</cap:severity><cap:onset xmlns:cap="x">2099-01-01T00:00:00Z</cap:onset><cap:expires xmlns:cap="x">2099-01-02T00:00:00Z</cap:expires><link type="application/cap+xml" href="https://example.com/a" /></entry><entry><cap:identifier xmlns:cap="x">expired</cap:identifier><cap:areaDesc xmlns:cap="x">Attiki</cap:areaDesc><cap:event xmlns:cap="x">Rain warning</cap:event><cap:expires xmlns:cap="x">2000-01-01T00:00:00Z</cap:expires></entry></feed>`;
+    const result = parseMeteoAlarmFeed(xml, "2026-10-11T18:01:00Z");
+    expect(result.alerts).toHaveLength(1);
+    expect(result.alerts[0].id).toBe("active");
   });
 });
 

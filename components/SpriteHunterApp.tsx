@@ -41,6 +41,7 @@ import {
 } from "lucide-react";
 import type {
   AuroraResponse,
+  DataStatus,
   EumetsatMetadata,
   LensProfile,
   OpportunityResponse,
@@ -53,6 +54,7 @@ import { angularDifference, inverseGeodesic } from "@/lib/geodesy";
 import { skyState } from "@/lib/astronomy";
 import { terrainVisibility } from "@/lib/terrain";
 import { formatAthens } from "@/lib/time";
+import { magneticDeclination, normalizeBearing } from "@/lib/wmm";
 
 const StormMap = dynamic(() => import("@/components/StormMap"), { ssr: false });
 
@@ -222,10 +224,13 @@ export default function SpriteHunterApp() {
   const [terrain, setTerrain] = useState<TerrainProfile | null>(null);
   const [terrainLoading, setTerrainLoading] = useState(false);
   const [radar, setRadar] = useState<RadarMetadata | null>(null);
+  const [radarStatus, setRadarStatus] = useState<DataStatus>("stale");
   const [radarVisible, setRadarVisible] = useState(true);
   const [eumetsat, setEumetsat] = useState<EumetsatMetadata | null>(null);
   const [lightningVisible, setLightningVisible] = useState(true);
   const [infraredVisible, setInfraredVisible] = useState(false);
+  const [cloudTopVisible, setCloudTopVisible] = useState(false);
+  const [instabilityVisible, setInstabilityVisible] = useState(false);
   const [ringsVisible, setRingsVisible] = useState(true);
   const [aurora, setAurora] = useState<AuroraResponse | null>(null);
   const [auroraLoading, setAuroraLoading] = useState(true);
@@ -282,8 +287,10 @@ export default function SpriteHunterApp() {
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
     fetch("/api/radar").then(async (response) => {
-      if (response.ok) setRadar((await response.json()) as RadarMetadata);
-    }).catch(() => setRadar(null));
+      if (!response.ok) throw new Error("Radar unavailable");
+      setRadar((await response.json()) as RadarMetadata);
+      setRadarStatus("available");
+    }).catch(() => { setRadar(null); setRadarStatus("unavailable"); });
     fetch("/api/eumetsat").then(async (response) => {
       const payload = (await response.json()) as EumetsatMetadata;
       setEumetsat(payload);
@@ -337,7 +344,7 @@ export default function SpriteHunterApp() {
         </nav>
         <div className="sidebar-foot">
           <div className="source-mini"><StatusDot status={error ? "unavailable" : loading ? "stale" : "available"} /><span>{loading ? "Έλεγχος πηγών…" : error ? "Σφάλμα παρόχου" : "Ζωντανά μοντέλα"}</span></div>
-          <p>v0.2 · installable PWA</p>
+          <p>v0.3 · installable PWA</p>
         </div>
       </aside>
 
@@ -356,17 +363,17 @@ export default function SpriteHunterApp() {
         </header>
 
         <div className="content">
-          {screen === "dashboard" && <DashboardView data={data} selected={selected} loading={loading} error={error} observer={observer} language={language} eumetsat={eumetsat} onPoint={goPoint} onMap={() => setScreen("map")} onSelect={selectCandidate} />}
-          {screen === "map" && <MapView data={data} selected={selected} observer={observer} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onRadar={setRadarVisible} onLightning={setLightningVisible} onInfrared={setInfraredVisible} onRings={setRingsVisible} onSelect={selectCandidate} onPoint={goPoint} />}
+          {screen === "dashboard" && <DashboardView data={data} selected={selected} loading={loading} error={error} observer={observer} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onPoint={goPoint} onMap={() => setScreen("map")} onSelect={selectCandidate} />}
+          {screen === "map" && <MapView data={data} selected={selected} observer={observer} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onRadar={setRadarVisible} onLightning={setLightningVisible} onInfrared={setInfraredVisible} onCloudTop={setCloudTopVisible} onInstability={setInstabilityVisible} onRings={setRingsVisible} onSelect={selectCandidate} onPoint={goPoint} />}
           {screen === "forecast" && <ForecastView data={data} selected={selected} onSelect={selectCandidate} onPoint={goPoint} />}
-          {screen === "point" && <PointView candidate={selected} lens={selectedLens} fov={fov} framing={framing} terrain={terrain} terrainLoading={terrainLoading} sky={currentSky} language={language} />}
+          {screen === "point" && <PointView candidate={selected} observer={observer} lens={selectedLens} fov={fov} framing={framing} terrain={terrain} terrainLoading={terrainLoading} sky={currentSky} language={language} />}
           {screen === "sky" && <SkyView candidate={selected} terrain={terrain} fov={fov} lens={selectedLens} orientation={orientation} sky={currentSky} onOrientation={setOrientation} />}
           {screen === "aurora" && <AuroraView aurora={aurora} loading={auroraLoading} lens={selectedLens} observer={observer} forecast={data?.observerForecast ?? []} />}
           {screen === "locations" && <LocationsView observer={observer} locations={locations} candidate={selected} onObserver={setObserver} onLocations={setLocations} />}
           {screen === "camera" && <CameraView candidate={selected} lenses={lenses} selectedLens={selectedLens} fov={fov} framing={framing} orientation={orientation} sky={currentSky} onSelect={setSelectedLensId} onLenses={setLenses} onOrientation={setOrientation} />}
           {screen === "logbook" && <LogbookView logs={logs} candidate={selected} lens={selectedLens} onLogs={setLogs} />}
           {screen === "alerts" && <AlertsView candidate={selected} />}
-          {screen === "settings" && <SettingsView observer={observer} range={range} data={data} language={language} eumetsat={eumetsat} onObserver={setObserver} onRange={setRange} onLanguage={setLanguage} onRefresh={refresh} />}
+          {screen === "settings" && <SettingsView observer={observer} range={range} data={data} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onObserver={setObserver} onRange={setRange} onLanguage={setLanguage} onRefresh={refresh} />}
         </div>
       </main>
 
@@ -377,12 +384,17 @@ export default function SpriteHunterApp() {
   );
 }
 
-function DashboardView({ data, selected, loading, error, observer, language, eumetsat, onPoint, onMap, onSelect }: {
-  data: OpportunityResponse | null; selected: StormCandidate | null; loading: boolean; error: string | null; observer: SavedLocation; language: Language; eumetsat: EumetsatMetadata | null; onPoint: () => void; onMap: () => void; onSelect: (id: string) => void;
+function DashboardView({ data, selected, loading, error, observer, language, eumetsat, radarStatus, onPoint, onMap, onSelect }: {
+  data: OpportunityResponse | null; selected: StormCandidate | null; loading: boolean; error: string | null; observer: SavedLocation; language: Language; eumetsat: EumetsatMetadata | null; radarStatus: DataStatus; onPoint: () => void; onMap: () => void; onSelect: (id: string) => void;
 }) {
   const t = strings[language];
   const referenceTime = data ? new Date(data.fetchedAt).getTime() : 0;
   const nowHour = data?.observerForecast.find((hour) => new Date(hour.time).getTime() >= referenceTime) ?? data?.observerForecast[0];
+  const aviation = data?.aviation;
+  const observedSky = aviation && aviation.status !== "unavailable" ? aviation : null;
+  const providers = (data?.providers ?? []).map((provider) => provider.id === "rainviewer"
+    ? { ...provider, status: radarStatus, message: radarStatus === "available" ? "Live metadata διαθέσιμα· η γεωγραφική κάλυψη παραμένει best-effort." : "Το live radar metadata δεν απάντησε τώρα." }
+    : provider);
   return (
     <div className="view-stack">
       <section className="hero-panel">
@@ -406,7 +418,7 @@ function DashboardView({ data, selected, loading, error, observer, language, eum
         <div className="hero-metrics">
           <Metric icon={Navigation} label="Αληθές αζιμούθιο" value={selected ? `${selected.bearingDeg.toFixed(1)}° · ${directionLabel(selected.bearingDeg, language)}` : "—"} />
           <Metric icon={Gauge} label="Απόσταση" value={selected ? `${selected.distanceKm.toFixed(0)} km` : "—"} hint="γεωδαιτική WGS84" />
-          <Metric icon={Cloud} label="Υψηλή νέφωση εδώ" value={nowHour?.cloudCoverHigh != null ? `${nowHour.cloudCoverHigh}%` : "—"} hint="πρόγνωση μοντέλου" />
+          <Metric icon={Cloud} label={observedSky ? "Παρατηρούμενη νέφωση" : "Υψηλή νέφωση εδώ"} value={observedSky?.cloudCoverPercent != null ? `${observedSky.cloudCoverPercent}%` : nowHour?.cloudCoverHigh != null ? `${nowHour.cloudCoverHigh}%` : "—"} hint={observedSky ? `METAR ${observedSky.stationId} · ${observedSky.distanceKm} km` : "πρόγνωση μοντέλου"} />
           <Metric icon={Moon} label="Χρήσιμη ανύψωση" value={selected ? `${selected.pointing[0].elevationDeg.toFixed(1)}°–${selected.pointing.at(-1)!.elevationDeg.toFixed(1)}°` : "—"} hint="50–90 km" />
         </div>
       </section>
@@ -431,9 +443,28 @@ function DashboardView({ data, selected, loading, error, observer, language, eum
           <div className="timeline-legend"><span><i className="legend-clear" />χαμηλή υψηλή νέφωση</span><span><i className="legend-cloud" />κλειστός ουρανός</span></div>
         </section>
 
+        <section className="panel field-intel-panel">
+          <div className="panel-heading"><div><span className="eyebrow">GROUND TRUTH & SAFETY</span><h2>Πραγματικές παρατηρήσεις</h2></div><Radio size={20} /></div>
+          <div className="field-intel-grid">
+            <article>
+              <div><span>METAR / TAF</span><StatusDot status={aviation?.status ?? "stale"} /></div>
+              <strong>{aviation?.stationId ? `${aviation.stationId} · ${aviation.distanceKm} km` : "Χωρίς κοντινή παρατήρηση"}</strong>
+              <p>{aviation?.cloudSummary ?? aviation?.message ?? "Αναμονή για AviationWeather…"}</p>
+              {aviation?.visibilityM != null && <small>Ορατότητα {(aviation.visibilityM / 1000).toFixed(1)} km · άνεμος {aviation.windSpeedKmh ?? "—"} km/h · {aviation.flightCategory ?? "—"}</small>}
+              {aviation?.rawMetar && <code>{aviation.rawMetar}</code>}
+            </article>
+            <article>
+              <div><span>METEOALARM · ΕΛΛΑΔΑ</span><StatusDot status={data?.weatherAlerts.status ?? "stale"} /></div>
+              <strong>{data?.weatherAlerts.alerts.length ? `${data.weatherAlerts.alerts.length} ενεργές προειδοποιήσεις` : "Καμία ενεργή προειδοποίηση"}</strong>
+              <p>{data?.weatherAlerts.message ?? "Αναμονή για επίσημη ροή…"}</p>
+              <div className="alert-chips">{data?.weatherAlerts.alerts.slice(0, 3).map((alert) => <a key={alert.id} href={alert.link} target="_blank" rel="noreferrer"><b>{alert.severity}</b>{alert.event.replace(/ warning/i, "")} · {alert.area}</a>)}</div>
+            </article>
+          </div>
+        </section>
+
         <section className="panel provider-panel">
           <div className="panel-heading"><div><span className="eyebrow">PROVENANCE</span><h2>Κατάσταση δεδομένων</h2></div><Database size={20} /></div>
-          <div className="provider-list"><div><StatusDot status={eumetsat?.status ?? "stale"} /><span><strong>EUMETSAT MTG-LI / IR</strong><small>{eumetsat?.message ?? "Έλεγχος δημόσιων δορυφορικών στρωμάτων…"}</small></span></div>{(data?.providers ?? []).map((provider) => <div key={provider.id}><StatusDot status={provider.status} /><span><strong>{provider.label}</strong><small>{provider.message}</small></span></div>)}</div>
+          <div className="provider-list"><div><StatusDot status={eumetsat?.status ?? "stale"} /><span><strong>EUMETSAT MTG / MSG</strong><small>{eumetsat?.message ?? "Έλεγχος δημόσιων δορυφορικών στρωμάτων…"}</small></span></div>{providers.map((provider) => <div key={provider.id}><StatusDot status={provider.status} /><span><strong>{provider.label}</strong><small>{provider.message}</small></span></div>)}</div>
           <p className="data-note"><ShieldAlert size={15} /> Τα μη διαθέσιμα δεδομένα δεν λογίζονται ως μηδενική δραστηριότητα.</p>
         </section>
       </div>
@@ -441,19 +472,19 @@ function DashboardView({ data, selected, loading, error, observer, language, eum
   );
 }
 
-function MapView({ data, selected, observer, radar, radarVisible, lightningVisible, infraredVisible, ringsVisible, eumetsat, onRadar, onLightning, onInfrared, onRings, onSelect, onPoint }: {
-  data: OpportunityResponse | null; selected: StormCandidate | null; observer: SavedLocation; radar: RadarMetadata | null; radarVisible: boolean; lightningVisible: boolean; infraredVisible: boolean; ringsVisible: boolean; eumetsat: EumetsatMetadata | null; onRadar: (value: boolean) => void; onLightning: (value: boolean) => void; onInfrared: (value: boolean) => void; onRings: (value: boolean) => void; onSelect: (id: string) => void; onPoint: () => void;
+function MapView({ data, selected, observer, radar, radarVisible, lightningVisible, infraredVisible, cloudTopVisible, instabilityVisible, ringsVisible, eumetsat, onRadar, onLightning, onInfrared, onCloudTop, onInstability, onRings, onSelect, onPoint }: {
+  data: OpportunityResponse | null; selected: StormCandidate | null; observer: SavedLocation; radar: RadarMetadata | null; radarVisible: boolean; lightningVisible: boolean; infraredVisible: boolean; cloudTopVisible: boolean; instabilityVisible: boolean; ringsVisible: boolean; eumetsat: EumetsatMetadata | null; onRadar: (value: boolean) => void; onLightning: (value: boolean) => void; onInfrared: (value: boolean) => void; onCloudTop: (value: boolean) => void; onInstability: (value: boolean) => void; onRings: (value: boolean) => void; onSelect: (id: string) => void; onPoint: () => void;
 }) {
   return (
     <div className="map-layout">
       <section className="map-panel">
-        <div className="map-toolbar"><div><span className="eyebrow">MEDITERRANEAN WATCH</span><h1>Ζωντανός χάρτης & πρόγνωση</h1></div><div className="layer-toggles"><label><input type="checkbox" checked={lightningVisible} onChange={(event) => onLightning(event.target.checked)} /> Κεραυνοί MTG</label><label><input type="checkbox" checked={infraredVisible} onChange={(event) => onInfrared(event.target.checked)} /> IR νέφη</label><label><input type="checkbox" checked={radarVisible} onChange={(event) => onRadar(event.target.checked)} /> Radar</label><label><input type="checkbox" checked={ringsVisible} onChange={(event) => onRings(event.target.checked)} /> Δακτύλιοι</label></div></div>
-        <div className="map-wrap"><StormMap observer={observer} candidates={data?.candidates ?? []} selectedId={selected?.id ?? null} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onSelect={onSelect} /><div className="map-legend"><span><i className="legend-observer" /> Παρατηρητής</span><span><i className="legend-target" /> Πρόγνωση</span><span><i className="legend-lightning" /> MTG-LI οπτικές εκπομπές</span><span><i className="legend-uncertainty" /> Αβεβαιότητα στόχου</span></div></div>
-        <p className="attribution">© OpenStreetMap contributors · Live lightning/IR: EUMETSAT MTG μέσω EUMETView WMS · Radar: RainViewer · Πρόγνωση: Open-Meteo. Το MTG-LI ανιχνεύει συνολική κεραυνική δραστηριότητα, όχι πολικότητα ή διάκριση CG/IC.</p>
+        <div className="map-toolbar"><div><span className="eyebrow">MEDITERRANEAN WATCH</span><h1>Ζωντανός χάρτης & πρόγνωση</h1></div><div className="layer-toggles"><label><input type="checkbox" checked={lightningVisible} onChange={(event) => onLightning(event.target.checked)} /> Κεραυνοί MTG</label><label><input type="checkbox" checked={infraredVisible} onChange={(event) => onInfrared(event.target.checked)} /> IR νέφη</label><label><input type="checkbox" checked={cloudTopVisible} onChange={(event) => onCloudTop(event.target.checked)} /> Ύψος κορυφών</label><label><input type="checkbox" checked={instabilityVisible} onChange={(event) => onInstability(event.target.checked)} /> K-index</label><label><input type="checkbox" checked={radarVisible} onChange={(event) => onRadar(event.target.checked)} /> Radar</label><label><input type="checkbox" checked={ringsVisible} onChange={(event) => onRings(event.target.checked)} /> Δακτύλιοι</label></div></div>
+        <div className="map-wrap"><StormMap observer={observer} candidates={data?.candidates ?? []} selectedId={selected?.id ?? null} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onSelect={onSelect} /><div className="map-legend"><span><i className="legend-observer" /> Παρατηρητής</span><span><i className="legend-target" /> Πρόγνωση</span><span><i className="legend-lightning" /> MTG-LI οπτικές εκπομπές</span><span><i className="legend-uncertainty" /> Αβεβαιότητα στόχου</span></div></div>
+        <p className="attribution">© OpenStreetMap contributors · Lightning/IR/CTH/K-index: EUMETSAT μέσω EUMETView WMS · Radar: RainViewer · Πρόγνωση: Open-Meteo. Τα δορυφορικά layers είναι οπτικές απεικονίσεις, όχι αριθμητικές μετρήσεις μέσα στη βαθμολογία.</p>
         <div className="lightning-shortcuts"><span>Εξωτερική διασταύρωση:</span><a href="https://www.lightningmaps.org/?lang=el" target="_blank" rel="noreferrer">LightningMaps Europe <ExternalLink size={13} /></a><a href="https://www.windy.com/-Weather-radar-radar" target="_blank" rel="noreferrer">Windy Radar + Lightning <ExternalLink size={13} /></a></div>
       </section>
       <aside className="target-drawer">
-        {selected ? <><span className="eyebrow">SELECTED FORECAST CELL</span><div className="drawer-score"><ScoreDial value={selected.score.total} /><div><h2>{directionLabel(selected.bearingDeg, "el")} · {selected.distanceKm.toFixed(0)} km</h2><span className="confidence-chip">{confidenceLabel(selected.score.confidence)} εμπιστοσύνη</span></div></div><div className="drawer-metrics"><Metric icon={Navigation} label="Αζιμούθιο" value={`${selected.bearingDeg.toFixed(1)}°`} /><Metric icon={Activity} label="CAPE" value={`${selected.capeJkg?.toFixed(0) ?? "—"} J/kg`} /><Metric icon={Sparkles} label="Lightning potential" value={selected.lightningPotentialJkg == null ? "μη διαθέσιμο" : `${selected.lightningPotentialJkg.toFixed(0)} J/kg`} /><Metric icon={Cloud} label="Υετός" value={`${selected.precipitationMm?.toFixed(1) ?? "—"} mm`} /><Metric icon={Wind} label="Άνεμος μοντέλου" value={`${selected.windSpeedKmh?.toFixed(0) ?? "—"} km/h`} /></div><div className="warning-box"><AlertTriangle size={17} /><p><strong>Δύο διαφορετικά σήματα.</strong> Τα χρωματιστά σημεία του MTG-LI είναι ζωντανή συνολική κεραυνική δραστηριότητα. Το lightning potential είναι πρόγνωση μοντέλου. Κανένα από τα δύο δεν δίνει πολικότητα +CG ή peak current.</p></div><div className="science-note"><strong>Για sprites</strong><p>Τα ισχυρά +CG είναι σημαντικά, αλλά το peak current μόνο του δεν αρκεί. Ισχυρότερος φυσικός δείκτης είναι η μεταβολή ροπής φορτίου (charge moment change), η οποία δεν παρέχεται από το MTG-LI.</p></div><button className="primary-action full" onClick={onPoint}><Crosshair size={18} />Άνοιγμα στόχευσης</button></> : <EmptyState title="Χωρίς επιλεγμένο στόχο" description="Επίλεξε μια προγνωστική κυψέλη στον χάρτη." />}
+        {selected ? <><span className="eyebrow">SELECTED FORECAST CELL</span><div className="drawer-score"><ScoreDial value={selected.score.total} /><div><h2>{directionLabel(selected.bearingDeg, "el")} · {selected.distanceKm.toFixed(0)} km</h2><span className="confidence-chip">{confidenceLabel(selected.score.confidence)} εμπιστοσύνη</span></div></div><div className="drawer-metrics"><Metric icon={Navigation} label="Αζιμούθιο" value={`${selected.bearingDeg.toFixed(1)}°`} /><Metric icon={Activity} label="CAPE" value={`${selected.capeJkg?.toFixed(0) ?? "—"} J/kg`} /><Metric icon={Gauge} label="Lifted Index" value={selected.liftedIndex == null ? "—" : selected.liftedIndex.toFixed(1)} /><Metric icon={ShieldAlert} label="CIN" value={selected.convectiveInhibitionJkg == null ? "—" : `${selected.convectiveInhibitionJkg.toFixed(0)} J/kg`} /><Metric icon={Sparkles} label="Lightning potential" value={selected.lightningPotentialJkg == null ? "μη διαθέσιμο" : `${selected.lightningPotentialJkg.toFixed(0)} J/kg`} /><Metric icon={Cloud} label="Υετός" value={`${selected.precipitationMm?.toFixed(1) ?? "—"} mm`} /><Metric icon={Wind} label="Άνεμος μοντέλου" value={`${selected.windSpeedKmh?.toFixed(0) ?? "—"} km/h`} /></div><div className="warning-box"><AlertTriangle size={17} /><p><strong>Δύο διαφορετικά σήματα.</strong> Τα χρωματιστά σημεία του MTG-LI είναι ζωντανή συνολική κεραυνική δραστηριότητα. Το lightning potential είναι πρόγνωση μοντέλου. Κανένα από τα δύο δεν δίνει πολικότητα +CG ή peak current.</p></div><div className="science-note"><strong>Για sprites</strong><p>Τα ισχυρά +CG είναι σημαντικά, αλλά το peak current μόνο του δεν αρκεί. Ισχυρότερος φυσικός δείκτης είναι η μεταβολή ροπής φορτίου (charge moment change), η οποία δεν παρέχεται από το MTG-LI.</p></div><button className="primary-action full" onClick={onPoint}><Crosshair size={18} />Άνοιγμα στόχευσης</button></> : <EmptyState title="Χωρίς επιλεγμένο στόχο" description="Επίλεξε μια προγνωστική κυψέλη στον χάρτη." />}
       </aside>
     </div>
   );
@@ -467,8 +498,8 @@ function signedAngle(target: number, current: number) {
   return ((target - current + 540) % 360) - 180;
 }
 
-function PointView({ candidate, lens, fov, framing, terrain, terrainLoading, sky, language }: {
-  candidate: StormCandidate | null; lens: LensProfile; fov: { horizontalDeg: number; verticalDeg: number }; framing: ReturnType<typeof framingAssessment> | null; terrain: TerrainProfile | null; terrainLoading: boolean; sky: ReturnType<typeof skyState> | null; language: Language;
+function PointView({ candidate, observer, lens, fov, framing, terrain, terrainLoading, sky, language }: {
+  candidate: StormCandidate | null; observer: SavedLocation; lens: LensProfile; fov: { horizontalDeg: number; verticalDeg: number }; framing: ReturnType<typeof framingAssessment> | null; terrain: TerrainProfile | null; terrainLoading: boolean; sky: ReturnType<typeof skyState> | null; language: Language;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -476,6 +507,7 @@ function PointView({ candidate, lens, fov, framing, terrain, terrainLoading, sky
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraMessage, setCameraMessage] = useState("Η εικόνα μένει στη συσκευή και δεν μεταφορτώνεται.");
   const [heading, setHeading] = useState<number | null>(null);
+  const [applyDeclination, setApplyDeclination] = useState(true);
   const [manualHeading, setManualHeading] = useState(candidate?.bearingDeg ?? 0);
   const [elevation, setElevation] = useState(candidate ? (candidate.pointing[0].elevationDeg + candidate.pointing.at(-1)!.elevationDeg) / 2 : 10);
   const [sensorMessage, setSensorMessage] = useState("Χειροκίνητη λειτουργία — χρησιμοποίησε τα ρυθμιστικά ή ενεργοποίησε τους αισθητήρες.");
@@ -539,7 +571,7 @@ function PointView({ candidate, lens, fov, framing, terrain, terrainLoading, sky
       orientationHandlerRef.current = handler;
       window.addEventListener("deviceorientationabsolute", handler);
       window.addEventListener("deviceorientation", handler);
-      setSensorMessage("Αισθητήρες ενεργοί. Οι ενδείξεις κινητού είναι προσεγγιστικές· βαθμονόμησε την πυξίδα πριν τη λήψη.");
+      setSensorMessage("Αισθητήρες ενεργοί. Κάνε κίνηση ∞ για βαθμονόμηση και κράτησε το κινητό μακριά από μέταλλα ή μαγνήτες.");
     } catch (error) { setSensorMessage(error instanceof Error ? error.message : "Οι αισθητήρες δεν υποστηρίζονται."); }
   };
 
@@ -552,7 +584,8 @@ function PointView({ candidate, lens, fov, framing, terrain, terrainLoading, sky
   const targetMin = (candidate.bearingDeg - targetHalfWidth + 360) % 360;
   const targetMax = (candidate.bearingDeg + targetHalfWidth) % 360;
   const visibility = terrainVisibility(terrain, candidate.pointing);
-  const effectiveHeading = heading ?? manualHeading;
+  const declination = magneticDeclination(observer.latitude, observer.longitude, observer.elevationM ?? 0);
+  const effectiveHeading = heading == null ? manualHeading : normalizeBearing(heading + (applyDeclination ? declination : 0));
   const horizontalError = signedAngle(candidate.bearingDeg, effectiveHeading);
   const verticalError = targetElevation - elevation;
   const aligned = angularDifference(effectiveHeading, candidate.bearingDeg) < 3 && Math.abs(verticalError) < 3;
@@ -563,7 +596,7 @@ function PointView({ candidate, lens, fov, framing, terrain, terrainLoading, sky
 
   return <div className="point-layout">
     <section className="point-hero">
-      <span className="eyebrow">LIVE CAMERA GUIDANCE · TRUE NORTH</span>
+      <span className="eyebrow">LIVE CAMERA GUIDANCE · WMM2025 TRUE NORTH</span>
       <h1>Στρέψε την κάμερα προς <em>{directionLabel(candidate.bearingDeg, language)}</em></h1>
       <div className="bearing-number"><strong>{candidate.bearingDeg.toFixed(1)}°</strong><span>αληθές αζιμούθιο · στόχος {targetElevation.toFixed(1)}° ψηλά</span></div>
       <div className={`camera-guidance ${cameraActive ? "active" : ""}`}>
@@ -571,11 +604,12 @@ function PointView({ candidate, lens, fov, framing, terrain, terrainLoading, sky
         <div className="camera-horizon" />
         <div className={`camera-target ${aligned ? "aligned" : ""}`} style={{ left: `${markerLeft}%`, top: `${markerTop}%` }}><Crosshair size={34} /><span>TLE</span></div>
         <div className={`guidance-instruction ${aligned ? "aligned" : ""}`} role="status" aria-live="polite">{instruction}</div>
-        <div className="camera-readout">Τώρα {effectiveHeading.toFixed(0)}° / {elevation.toFixed(0)}° · στόχος {candidate.bearingDeg.toFixed(0)}° / {targetElevation.toFixed(0)}°</div>
+        <div className="camera-readout">Τώρα {effectiveHeading.toFixed(0)}° αληθές / {elevation.toFixed(0)}° · στόχος {candidate.bearingDeg.toFixed(0)}° / {targetElevation.toFixed(0)}°</div>
       </div>
       {!cameraActive && <div className="camera-start-note"><Camera size={22} /><div><strong>Η κάμερα είναι κλειστή</strong><span>Πάτησε «Άνοιγμα κάμερας» για ζωντανή εικόνα. Ο δείκτης στόχευσης λειτουργεί και χειροκίνητα.</span></div></div>}
       <div className="guidance-actions"><button className="primary-action" onClick={toggleCamera}><Camera size={18} />{cameraActive ? "Κλείσιμο κάμερας" : "Άνοιγμα κάμερας"}</button><button className="secondary-action" onClick={enableCompass}><Compass size={18} />Αισθητήρες</button></div>
       <p className="sensor-note">{cameraMessage} {sensorMessage}</p>
+      <label className="wmm-toggle"><input type="checkbox" checked={applyDeclination} onChange={(event) => setApplyDeclination(event.target.checked)} disabled={heading == null} /><span><strong>Διόρθωση WMM2025 {declination >= 0 ? "+" : ""}{declination.toFixed(1)}°</strong> από μαγνητικό σε αληθή βορρά. Απενεργοποίησέ την μόνο αν η συσκευή σου δίνει ήδη αληθές αζιμούθιο.</span></label>
       <div className="manual-guidance"><label>Αζιμούθιο συσκευής <strong>{effectiveHeading.toFixed(0)}°</strong><input type="range" min="0" max="359" value={effectiveHeading} onChange={(event) => { setHeading(null); setManualHeading(Number(event.target.value)); }} /></label><label>Ανύψωση κάμερας <strong>{elevation.toFixed(0)}°</strong><input type="range" min="-5" max="60" value={elevation} onChange={(event) => setElevation(Number(event.target.value))} /></label></div>
       <div className="point-grid"><div><span>Οριζόντιος τομέας</span><strong>{targetMin.toFixed(1)}° → {targetMax.toFixed(1)}°</strong></div><div><span>Χρήσιμη ανύψωση</span><strong>{minElevation.toFixed(1)}° → {maxElevation.toFixed(1)}°</strong></div><div><span>Ορίζοντας εδάφους</span><strong>{terrainLoading ? "υπολογισμός…" : terrain?.horizonAngleDeg != null ? `${terrain.horizonAngleDeg.toFixed(1)}°` : "μη επαληθευμένος"}</strong></div><div><span>Ορατό εύρος TLE</span><strong>{visibility.status === "clear" ? "50–90 km" : visibility.status === "partial" ? `${visibility.visibleAltitudesKm[0]}–${visibility.visibleAltitudesKm.at(-1)} km` : visibility.status === "blocked" ? "Αποκλεισμένο" : "Άγνωστο"}</strong></div></div>
     </section>
@@ -701,7 +735,10 @@ function AlertsView({ candidate }: { candidate: StormCandidate | null }) {
   return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">EVENT-DRIVEN WATCH</span><h1>Ειδοποιήσεις</h1><p>Ειδοποίηση μόνο όταν η ευκαιρία αλλάζει ουσιαστικά — όχι συνεχής θόρυβος.</p></div><Bell size={30} /></div><div className="alerts-grid"><section className="panel alert-settings"><h2>Κανόνες ειδοποίησης</h2><label>Ελάχιστος δείκτης <strong>{prefs.minimumScore}/100</strong><input type="range" min="30" max="85" value={prefs.minimumScore} onChange={(event) => setPrefs({ ...prefs, minimumScore: Number(event.target.value) })} /></label><label>Ελάχιστη εμπιστοσύνη<select value={prefs.confidence} onChange={(event) => setPrefs({ ...prefs, confidence: event.target.value })}><option value="low">Χαμηλή</option><option value="medium">Μέτρια</option><option value="high">Υψηλή</option></select></label><label>Cooldown (λεπτά)<input type="number" value={prefs.cooldown} onChange={(event) => setPrefs({ ...prefs, cooldown: Number(event.target.value) })} /></label><div className="two-fields"><label>Έναρξη ησυχίας<input type="time" value={prefs.quietStart} onChange={(event) => setPrefs({ ...prefs, quietStart: event.target.value })} /></label><label>Λήξη ησυχίας<input type="time" value={prefs.quietEnd} onChange={(event) => setPrefs({ ...prefs, quietEnd: event.target.value })} /></label></div><button className="secondary-action" onClick={request}><Bell size={17} />Άδεια browser notification</button><p className="data-note">Κατάσταση άδειας: {permission}</p></section><section className="panel"><span className="eyebrow">CURRENT EVALUATION</span><h2>{candidate && candidate.score.total >= prefs.minimumScore ? "Περνά το όριο δείκτη" : "Δεν περνά το όριο"}</h2><div className="alert-preview"><Bell size={20} /><div><strong>Παράδειγμα παραγόμενης ειδοποίησης</strong><p>{candidate ? `Προγνωστική κυψέλη ${candidate.distanceKm.toFixed(0)} km προς ${directionLabel(candidate.bearingDeg, "el")}, δείκτης ${candidate.score.total}/100. Δεν έχει επιβεβαιωθεί ηλεκτρική δραστηριότητα.` : "Δεν υπάρχει κατάλληλος στόχος τώρα."}</p></div></div><div className="warning-box"><AlertTriangle size={17} /><p><strong>Ο browser δεν είναι server.</strong> Με κλειστή εφαρμογή δεν εκτελείται αξιόπιστη παρακολούθηση. Η παρούσα έκδοση παρέχει in-app/browser notifications· server push απαιτεί αποθήκευση συνδρομών και προγραμματισμένο worker.</p></div></section></div></div>;
 }
 
-function SettingsView({ observer, range, data, language, eumetsat, onObserver, onRange, onLanguage, onRefresh }: { observer: SavedLocation; range: { min: number; max: number }; data: OpportunityResponse | null; language: Language; eumetsat: EumetsatMetadata | null; onObserver: (value: SavedLocation) => void; onRange: (value: { min: number; max: number }) => void; onLanguage: (value: Language) => void; onRefresh: () => void }) {
+function SettingsView({ observer, range, data, language, eumetsat, radarStatus, onObserver, onRange, onLanguage, onRefresh }: { observer: SavedLocation; range: { min: number; max: number }; data: OpportunityResponse | null; language: Language; eumetsat: EumetsatMetadata | null; radarStatus: DataStatus; onObserver: (value: SavedLocation) => void; onRange: (value: { min: number; max: number }) => void; onLanguage: (value: Language) => void; onRefresh: () => void }) {
+  const providers = (data?.providers ?? []).map((provider) => provider.id === "rainviewer"
+    ? { ...provider, status: radarStatus, message: radarStatus === "available" ? "Live metadata διαθέσιμα· κάλυψη best-effort." : "Το live radar metadata δεν απάντησε τώρα." }
+    : provider);
   return (
     <div className="view-stack">
       <div className="view-heading"><div><span className="eyebrow">SCIENTIFIC CONFIGURATION</span><h1>Ρυθμίσεις & πηγές</h1><p>Οι επιστημονικές παραδοχές είναι ορατές και δεν παρουσιάζονται ως βεβαιότητες.</p></div><Settings size={30} /></div>
@@ -709,17 +746,20 @@ function SettingsView({ observer, range, data, language, eumetsat, onObserver, o
         <section className="panel settings-form"><h2>Παρατήρηση</h2><label>Γλώσσα<select value={language} onChange={(event) => onLanguage(event.target.value as Language)}><option value="el">Ελληνικά</option><option value="en">English</option></select></label><div className="two-fields"><label>Ελάχιστη ακτίνα (km)<input type="number" min="100" max="700" value={range.min} onChange={(event) => onRange({ ...range, min: Number(event.target.value) })} /></label><label>Μέγιστη ακτίνα (km)<input type="number" min="200" max="800" value={range.max} onChange={(event) => onRange({ ...range, max: Number(event.target.value) })} /></label></div><label>Σημειώσεις ασφάλειας<textarea rows={3} value={observer.safetyNotes} onChange={(event) => onObserver({ ...observer, safetyNotes: event.target.value })} /></label><button className="primary-action" onClick={onRefresh}><RefreshCw size={17} />Εφαρμογή & νέα σάρωση</button></section>
         <section className="panel data-sources-panel">
           <h2>Πηγές δεδομένων</h2>
-          <div className="provider-list detailed"><div><StatusDot status={eumetsat?.status ?? "stale"} /><span><strong>EUMETSAT MTG-LI / IR</strong><small>{eumetsat?.message ?? "Έλεγχος δημόσιου WMS…"}</small></span></div>{(data?.providers ?? []).map((provider) => <div key={provider.id}><StatusDot status={provider.status} /><span><strong>{provider.label}</strong><small>{provider.message}</small></span></div>)}</div>
+          <div className="provider-list detailed"><div><StatusDot status={eumetsat?.status ?? "stale"} /><span><strong>EUMETSAT MTG / MSG</strong><small>{eumetsat?.message ?? "Έλεγχος δημόσιου WMS…"}</small></span></div>{providers.map((provider) => <div key={provider.id}><StatusDot status={provider.status} /><span><strong>{provider.label}</strong><small>{provider.message}</small></span></div>)}</div>
           <div className="source-comparison">
-            <article><span>ΕΝΣΩΜΑΤΩΜΕΝΟ · ΕΥΡΩΠΗ</span><strong>EUMETSAT MTG-LI</strong><p>Δωρεάν live οπτική ανίχνευση συνολικής κεραυνικής δραστηριότητας. Δεν δίνει πολικότητα +/−, CG/IC ή peak current.</p></article>
-            <article><span>ΕΞΩΤΕΡΙΚΟΣ LIVE ΧΑΡΤΗΣ</span><strong>LightningMaps / Blitzortung</strong><p>Χρήσιμο για οπτική επιβεβαίωση. Η raw τροφοδοσία προορίζεται για συμμετέχοντες ή ειδικά εγκεκριμένα μη εμπορικά έργα.</p></article>
+            <article><span>ΕΝΣΩΜΑΤΩΜΕΝΟ · ΕΥΡΩΠΗ</span><strong>EUMETSAT MTG / MSG</strong><p>Live συνολικοί κεραυνοί, IR, ύψος κορυφών και δείκτης K ως οπτικά layers. Δεν δίνουν πολικότητα +/−, CG/IC ή peak current.</p></article>
+            <article><span>ΠΡΑΓΜΑΤΙΚΗ ΠΑΡΑΤΗΡΗΣΗ</span><strong>AviationWeather METAR / TAF</strong><p>Δωρεάν παγκόσμιες μετρήσεις νέφωσης, ορατότητας και ανέμου από τον κοντινότερο αεροπορικό σταθμό. Στη βαθμολογία χρησιμοποιούνται μόνο όταν είναι χρονικά και γεωγραφικά σχετικά.</p></article>
+            <article><span>ΕΠΙΣΗΜΗ ΠΡΟΕΙΔΟΠΟΙΗΣΗ</span><strong>MeteoAlarm</strong><p>Ενεργές προειδοποιήσεις καταιγίδας και ακραίου καιρού για την Ελλάδα. Βελτιώνει την επίγνωση κινδύνου, όχι την ταυτοποίηση sprites.</p></article>
+            <article><span>ΠΡΟΣΑΝΑΤΟΛΙΣΜΟΣ · OFFLINE</span><strong>NOAA WMM2025</strong><p>Μετατρέπει τη μαγνητική ένδειξη της συσκευής σε αληθές αζιμούθιο. Η διόρθωση γίνεται τοπικά χωρίς API key.</p></article>
+            <article><span>ΕΞΩΤΕΡΙΚΟΣ LIVE ΧΑΡΤΗΣ</span><strong>LightningMaps / Blitzortung</strong><p>Χρήσιμο για οπτική διασταύρωση. Το δίκτυο δηλώνει ότι δεν ξεχωρίζει αξιόπιστα CG/IC, πολικότητα ή ρεύμα· δεν χρησιμοποιείται ως +CG feed.</p></article>
             <article><span>API KEY · PLAN-DEPENDENT</span><strong>Weatherbit Lightning</strong><p>Επιστρέφει πρόσφατες θέσεις και χρόνους flashes. Δεν αντικαθιστά πάροχο με επαληθευμένη πολικότητα και peak current.</p></article>
             <article><span>ΔΩΡΕΑΝ · ΑΜΕΡΙΚΗ</span><strong>NOAA GOES-GLM</strong><p>Δημόσια total-lightning δεδομένα για Αμερική και γειτονικούς ωκεανούς· δεν καλύπτει την Ελλάδα.</p></article>
           </div>
-          <div className="source-links"><a href="https://view.eumetsat.int/productviewer/productDetails/mtg_fd%3Ali_afa" target="_blank" rel="noreferrer">EUMETSAT MTG-LI <ExternalLink size={14} /></a><a href="https://open-meteo.com/en/docs" target="_blank" rel="noreferrer">Open-Meteo + LPI <ExternalLink size={14} /></a><a href="https://www.rainviewer.com/api.html" target="_blank" rel="noreferrer">RainViewer <ExternalLink size={14} /></a><a href="https://www.lightningmaps.org/?lang=el" target="_blank" rel="noreferrer">LightningMaps Live <ExternalLink size={14} /></a><a href="https://www.blitzortung.org/en/compendium.php" target="_blank" rel="noreferrer">Blitzortung raw access <ExternalLink size={14} /></a><a href="https://www.weatherbit.io/api/lightning-current" target="_blank" rel="noreferrer">Weatherbit Lightning API <ExternalLink size={14} /></a><a href="https://goes-r.noaa.gov/spacesegment/glm.html" target="_blank" rel="noreferrer">NOAA GOES-GLM <ExternalLink size={14} /></a><a href="https://science.nasa.gov/citizen-science/spritacular/" target="_blank" rel="noreferrer">NASA Spritacular <ExternalLink size={14} /></a><a href="https://www.swpc.noaa.gov/products/aurora-30-minute-forecast" target="_blank" rel="noreferrer">NOAA Aurora <ExternalLink size={14} /></a><a href="https://www.opentopodata.org/" target="_blank" rel="noreferrer">OpenTopoData <ExternalLink size={14} /></a></div>
+          <div className="source-links"><a href="https://view.eumetsat.int/productviewer/productDetails/mtg_fd%3Ali_afa" target="_blank" rel="noreferrer">EUMETSAT MTG-LI <ExternalLink size={14} /></a><a href="https://aviationweather.gov/data/api/" target="_blank" rel="noreferrer">AviationWeather API <ExternalLink size={14} /></a><a href="https://meteoalarm.org/" target="_blank" rel="noreferrer">MeteoAlarm <ExternalLink size={14} /></a><a href="https://www.ncei.noaa.gov/products/world-magnetic-model" target="_blank" rel="noreferrer">NOAA WMM2025 <ExternalLink size={14} /></a><a href="https://open-meteo.com/en/docs" target="_blank" rel="noreferrer">Open-Meteo <ExternalLink size={14} /></a><a href="https://www.rainviewer.com/api.html" target="_blank" rel="noreferrer">RainViewer <ExternalLink size={14} /></a><a href="https://www.lightningmaps.org/?lang=el" target="_blank" rel="noreferrer">LightningMaps Live <ExternalLink size={14} /></a><a href="https://www.blitzortung.org/en/compendium.php" target="_blank" rel="noreferrer">Blitzortung <ExternalLink size={14} /></a><a href="https://www.weatherbit.io/api/lightning-current" target="_blank" rel="noreferrer">Weatherbit Lightning API <ExternalLink size={14} /></a><a href="https://goes-r.noaa.gov/spacesegment/glm.html" target="_blank" rel="noreferrer">NOAA GOES-GLM <ExternalLink size={14} /></a><a href="https://science.nasa.gov/citizen-science/spritacular/" target="_blank" rel="noreferrer">NASA Spritacular <ExternalLink size={14} /></a><a href="https://www.swpc.noaa.gov/products/aurora-30-minute-forecast" target="_blank" rel="noreferrer">NOAA Aurora <ExternalLink size={14} /></a><a href="https://www.opentopodata.org/" target="_blank" rel="noreferrer">OpenTopoData <ExternalLink size={14} /></a></div>
           <p className="data-note">Δεν προστέθηκε OpenWeather “Historical Lightning”, επειδή δεν βρέθηκε επίσημα τεκμηριωμένο endpoint κεραυνικών παρατηρήσεων. Για την Ελλάδα η εφαρμογή κρατά το δωρεάν MTG-LI ως κύρια live στρώση.</p>
         </section>
-        <section className="panel sprite-evidence"><div className="panel-heading"><div><span className="eyebrow">SPRITE EVIDENCE LADDER</span><h2>Τι προσθέτει πραγματική βεβαιότητα</h2></div><Radio size={20} /></div><div className="signal-guide"><article><span>01 · LIVE</span><strong>MTG Lightning Imager</strong><p>Δωρεάν οπτική ανίχνευση συνολικών κεραυνών ανά 5 λεπτά για Ευρώπη. Δεν ξεχωρίζει CG/IC ούτε πολικότητα.</p></article><article><span>02 · POLARITY</span><strong>+CG και charge moment</strong><p>Η θετική πολικότητα είναι χρήσιμη, αλλά το peak current δεν είναι πιθανότητα sprite. Η μεταβολή ροπής φορτίου είναι ισχυρότερος φυσικός δείκτης.</p></article><article><span>03 · VALIDATION</span><strong>NASA Spritacular</strong><p>Χρησιμοποίησέ το για υποβολή και επιστημονική επιβεβαίωση φωτογραφιών με ακριβή ώρα, θέση και κατεύθυνση.</p></article></div><p className="data-note">Η raw τροφοδοσία Blitzortung με πολικότητα διατίθεται στους συμμετέχοντες του δικτύου. Η εφαρμογή δεν κάνει scraping ούτε βαφτίζει τα MTG συμβάντα ως +CG.</p></section>
+        <section className="panel sprite-evidence"><div className="panel-heading"><div><span className="eyebrow">SPRITE EVIDENCE LADDER</span><h2>Τι προσθέτει πραγματική βεβαιότητα</h2></div><Radio size={20} /></div><div className="signal-guide"><article><span>01 · LIVE</span><strong>MTG Lightning Imager</strong><p>Δωρεάν οπτική ανίχνευση συνολικών κεραυνών ανά 5 λεπτά για Ευρώπη. Δεν ξεχωρίζει CG/IC ούτε πολικότητα.</p></article><article><span>02 · POLARITY</span><strong>+CG και charge moment</strong><p>Η θετική πολικότητα είναι χρήσιμη, αλλά το peak current δεν είναι πιθανότητα sprite. Η μεταβολή ροπής φορτίου είναι ισχυρότερος φυσικός δείκτης.</p></article><article><span>03 · VALIDATION</span><strong>NASA Spritacular</strong><p>Χρησιμοποίησέ το για υποβολή και επιστημονική επιβεβαίωση φωτογραφιών με ακριβή ώρα, θέση και κατεύθυνση.</p></article></div><p className="data-note">Δεν υπάρχει επαληθευμένη δωρεάν δημόσια πηγή για Ελλάδα που να παρέχει ταυτόχρονα +CG, peak current και charge moment. Η εφαρμογή δεν κάνει scraping και δεν παρουσιάζει total-lightning ως +CG.</p></section>
         <section className="panel assumptions"><h2>Υψομετρικά περιβλήματα</h2>{[["Red Sprites", "50–90 km", "κύριο μοντέλο"], ["Sprite Halos", "70–90 km", "ενημερωτικό"], ["ELVES", "70–100 km", "πειραματικό"], ["Blue Jets", "15–50 km", "πειραματικό"], ["Gigantic Jets", "15–90 km", "πειραματικό"]].map(([name, altitude, status]) => <div key={name}><span><strong>{name}</strong><small>{status}</small></span><b>{altitude}</b></div>)}<p className="data-note">Τα TLE είναι στιγμιαία φαινόμενα πάνω από καταιγίδες και δεν προβλέπονται με βεβαιότητα από κοινά μετεωρολογικά δεδομένα.</p></section>
       </div>
     </div>

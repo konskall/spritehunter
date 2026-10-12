@@ -3,12 +3,16 @@ import { darknessScore } from "@/lib/astronomy";
 
 interface ScoreInput {
   capeJkg: number | null;
+  convectiveInhibitionJkg?: number | null;
+  liftedIndex?: number | null;
+  precipitableWaterKgM2?: number | null;
   precipitationMm: number | null;
   thunderCode: boolean;
   lightningPotentialJkg?: number | null;
   observerCloudPercent: number | null;
   observerHighCloudPercent: number | null;
   visibilityM: number | null;
+  atmosphereSource?: "observation" | "forecast";
   distanceKm: number;
   sunAltitudeDeg: number;
   moonInterference: boolean;
@@ -23,9 +27,18 @@ export function scoreOpportunity(input: ScoreInput): ScoreBreakdown {
   const limitations: string[] = [];
   const cape = input.capeJkg ?? 0;
   const precipitation = input.precipitationMm ?? 0;
-  let activity = clamp(cape / 90, 0, 18) + clamp(precipitation * 1.7, 0, 5) + (input.thunderCode ? 4 : 0);
+  const cin = input.convectiveInhibitionJkg ?? 0;
+  const liftedIndex = input.liftedIndex ?? 0;
+  const precipitableWater = input.precipitableWaterKgM2 ?? 20;
+  let activity = clamp(cape / 100, 0, 15)
+    + clamp(precipitation * 1.5, 0, 4)
+    + (input.thunderCode ? 4 : 0)
+    + clamp(-liftedIndex, 0, 3)
+    + clamp((precipitableWater - 24) / 4, 0, 2)
+    - clamp((cin - 75) / 35, 0, 4);
   const lightningPotential = input.lightningPotentialJkg ?? 0;
-  activity += clamp(lightningPotential / 80, 0, 6);
+  activity += clamp(lightningPotential / 90, 0, 5);
+  activity = Math.max(0, activity);
   if (input.lightning === "observed") activity = clamp(activity + 8, 0, 35);
   else {
     activity = Math.min(activity, 27);
@@ -35,11 +48,15 @@ export function scoreOpportunity(input: ScoreInput): ScoreBreakdown {
   if (cape >= 800) reasons.push("Ισχυρό προγνωστικό σήμα αστάθειας (CAPE).");
   else if (cape >= 300) reasons.push("Μέτριο προγνωστικό σήμα αστάθειας.");
   if (lightningPotential >= 100) reasons.push("Το αριθμητικό μοντέλο δείχνει αυξημένο προγνωστικό lightning potential.");
+  if (liftedIndex <= -2) reasons.push("Αρνητικός Lifted Index ενισχύει το προγνωστικό σήμα αστάθειας.");
+  if (cin >= 150) limitations.push("Ισχυρή convective inhibition μπορεί να καταστείλει την ανάπτυξη καταιγίδων.");
 
   const cloud = input.observerCloudPercent ?? 65;
   const highCloud = input.observerHighCloudPercent ?? cloud;
   const visibility = input.visibilityM ?? 10_000;
-  const atmosphere = clamp(20 * (1 - highCloud / 100) + 10 * (visibility / 30_000), 0, 30);
+  const blockingCloud = Math.max(highCloud, cloud * 0.85);
+  const atmosphere = clamp(20 * (1 - blockingCloud / 100) + 10 * (visibility / 30_000), 0, 30);
+  if (input.atmosphereSource === "observation") reasons.push("Η τοπική νέφωση και ορατότητα προέρχονται από πρόσφατη πραγματική παρατήρηση METAR.");
   if (highCloud < 25) reasons.push("Λίγες υψηλές νεφώσεις στη θέση παρατήρησης.");
   if (highCloud > 70) limitations.push("Οι υψηλές νεφώσεις μπορεί να κρύψουν την ανώτερη ατμόσφαιρα.");
 

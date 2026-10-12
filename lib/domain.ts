@@ -40,6 +40,9 @@ export interface WeatherHour {
   windSpeedKmh: number | null;
   windDirectionDeg: number | null;
   capeJkg: number | null;
+  convectiveInhibitionJkg: number | null;
+  liftedIndex: number | null;
+  precipitableWaterKgM2: number | null;
   weatherCode: number | null;
 }
 
@@ -78,6 +81,9 @@ export interface StormCandidate {
   bearingDeg: number;
   uncertaintyKm: number;
   capeJkg: number | null;
+  convectiveInhibitionJkg: number | null;
+  liftedIndex: number | null;
+  precipitableWaterKgM2: number | null;
   precipitationMm: number | null;
   weatherCode: number | null;
   lightningPotentialJkg: number | null;
@@ -91,7 +97,7 @@ export interface StormCandidate {
 }
 
 export interface ProviderHealth {
-  id: "open_meteo" | "open_meteo_lpi" | "air_quality" | "rainviewer" | "xweather" | "terrain";
+  id: "open_meteo" | "open_meteo_lpi" | "air_quality" | "aviation_weather" | "meteoalarm" | "rainviewer" | "xweather" | "terrain";
   label: string;
   status: DataStatus;
   checkedAt: string;
@@ -115,6 +121,48 @@ export interface EumetsatMetadata {
   retrievedAt: string;
   lightningTime: string | null;
   infraredTime: string | null;
+  cloudTopTime: string | null;
+  kIndexTime: string | null;
+  liftedIndexTime: string | null;
+  message: string;
+}
+
+export interface AviationObservation {
+  status: DataStatus;
+  stationId: string | null;
+  stationName: string | null;
+  distanceKm: number | null;
+  observedAt: string | null;
+  retrievedAt: string;
+  visibilityM: number | null;
+  cloudCoverPercent: number | null;
+  cloudSummary: string | null;
+  windDirectionDeg: number | null;
+  windSpeedKmh: number | null;
+  weather: string | null;
+  flightCategory: string | null;
+  rawMetar: string | null;
+  rawTaf: string | null;
+  tafValidFrom: string | null;
+  tafValidTo: string | null;
+  message: string;
+}
+
+export interface WeatherAlert {
+  id: string;
+  area: string;
+  event: string;
+  severity: string;
+  onset: string | null;
+  expires: string | null;
+  link: string;
+}
+
+export interface WeatherAlertResponse {
+  status: DataStatus;
+  retrievedAt: string;
+  updatedAt: string | null;
+  alerts: WeatherAlert[];
   message: string;
 }
 
@@ -123,6 +171,8 @@ export interface OpportunityResponse {
   fetchedAt: string;
   observerForecast: WeatherHour[];
   airQuality: AirQualityHour[];
+  aviation: AviationObservation;
+  weatherAlerts: WeatherAlertResponse;
   candidates: StormCandidate[];
   providers: ProviderHealth[];
   warnings: string[];
