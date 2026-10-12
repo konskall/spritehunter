@@ -6,8 +6,9 @@
 
 - Endpoint: `https://api.open-meteo.com/v1/forecast`
 - Χρήση: cloud cover low/mid/high, visibility, precipitation/probability, humidity, wind, CAPE και WMO weather code.
-- Το app στέλνει μία multi-coordinate αίτηση: παρατηρητής + 24 χονδροειδή σημεία σε τρεις αποστάσεις και οκτώ αζιμούθια.
-- Cache εφαρμογής: 15 λεπτά.
+- Το app στέλνει τρεις multi-coordinate αιτήσεις (παρατηρητής + 2 × 12 σημεία σε τρεις αποστάσεις και οκτώ αζιμούθια) για 48 ώρες. Περισσότερες παράλληλες αιτήσεις προκαλούσαν HTTP 429.
+- Κάθε αίτηση έχει όριο 12 s και συνολικό όριο 20 s με ένα retry· σε αποτυχία εμφανίζονται μερικά αποτελέσματα.
+- Cache εφαρμογής: 15 λεπτά. Το `/api/opportunities` δέχεται έως 30 αιτήματα/λεπτό ανά IP.
 - Δεν θεωρεί CAPE ή model weather code ως πραγματική παρατήρηση κεραυνών.
 - Δωρεάν βασική χρήση σύμφωνα με τους τρέχοντες όρους του provider· για εμπορικό/SLA σενάριο έλεγξε το pricing του provider.
 
@@ -29,7 +30,7 @@
 ## OpenTopoData
 
 - Endpoint: `https://api.opentopodata.org/v1/srtm30m`
-- Δημόσιο όριο: 100 θέσεις/αίτηση, 1 κλήση/δευτερόλεπτο, 1.000 κλήσεις/ημέρα.
+- Δημόσιο όριο: 100 θέσεις/αίτηση, 1 κλήση/δευτερόλεπτο, 1.000 κλήσεις/ημέρα. Το `/api/terrain` δέχεται έως 20 αιτήματα/λεπτό ανά IP.
 - Το app ζητά 20 προσαρμοστικά δείγματα στον επιλεγμένο τομέα έως 120 km και cache 7 ημερών.
 - Δεν χαρακτηρίζει τον ορίζοντα «επαληθευμένο» όταν λείπουν τιμές DEM.
 - Για παραγωγικό πλήρες 360° profile προτείνεται self-hosted SRTM/Copernicus pipeline με τοπικά cached tiles.
@@ -41,6 +42,31 @@
 - Το app ζητά lightning μόνο για επιλεγμένη υποψήφια περιοχή. Τα credentials παραμένουν server-side.
 - Η απάντηση επικυρώνεται και κανονικοποιείται σε id, θέση, ώρα, age, IC/CG, peak amplitude/polarity, sensor count και quality metric.
 - Χωρίς credentials το endpoint επιστρέφει `not_configured` και κενό event array.
+
+## EUMETSAT EUMETView WMS
+
+- Endpoint: `https://view.eumetsat.int/geoserver/wms` (δημόσιο, χωρίς κλειδί).
+- Layers: `mtg_fd:li_afa` (MTG-LI), `mtg_fd:ir105_hrfi`, `msg_fes:cth`, `msg_fes:gii_kindex`.
+- Το app ζητά **μία** εικόνα GetMap ανά layer για όλη την προβολή του χάρτη, σε `EPSG:3857`, έως 1024 px. Αιτήματα σε `CRS:84` μετατόπιζαν τα σημεία έως ~40 km, και μεγαλύτερες εικόνες επέστρεφαν συχνά HTTP 500/504. Σε αποτυχία γίνονται έως δύο επαναλήψεις.
+
+## AviationWeather.gov METAR / TAF
+
+- Endpoint: `https://aviationweather.gov/api/data/metar` και `/taf` (δωρεάν, χωρίς κλειδί, χωρίς CORS· μόνο μέσω server).
+- Επιλέγεται η νεότερη αναφορά κάθε σταθμού και ο πλησιέστερος σταθμός με αναφορά έως 90 λεπτών.
+- Στη βαθμολογία χρησιμοποιείται μόνο για χαμηλή/μέση νέφωση και ορατότητα· δεν βλέπει cirrus, οπότε η υψηλή νέφωση έρχεται πάντα από την πρόγνωση.
+
+## MeteoAlarm
+
+- Endpoint: `https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-greece` (χωρίς CORS· μόνο μέσω server).
+- Εμφανίζεται ο πραγματικός αριθμός ενεργών/επικείμενων προειδοποιήσεων. Η σειρά βασίζεται σε προσεγγιστικό κέντρο καθεμιάς από τις 16 περιοχές, στη σοβαρότητα και στον τύπο καταιγίδας.
+
+## NOAA SWPC
+
+- `planetary_k_index_1m.json` και `ovation_aurora_latest.json` (~900 KB). Τα δεδομένα είναι κοινά για όλους τους χρήστες, κρατούνται 5 λεπτά στον server και ζητούνται μόνο όταν ανοίγει η οθόνη σέλαος.
+
+## OpenStreetMap tiles
+
+- `https://tile.openstreetmap.org` για το υπόβαθρο, με ορατό attribution. Για δημόσια ή εμπορική χρήση με κίνηση απαιτείται δικός σου tile provider, σύμφωνα με την πολιτική χρήσης του OSM.
 
 ## Blitzortung / LightningMaps
 

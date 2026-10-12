@@ -84,7 +84,9 @@ export async function GET(request: Request) {
         horizonAngleDeg: null,
         samples: [],
         retrievedAt,
-        message: error instanceof Error ? error.message : "Terrain provider unavailable",
+        message: error instanceof Error && error.name === "AbortError"
+          ? "Ο πάροχος DEM (OpenTopoData) δεν απάντησε εγκαίρως· ο ορίζοντας παραμένει μη επαληθευμένος."
+          : error instanceof Error ? error.message : "Terrain provider unavailable",
       } satisfies TerrainProfile,
       { status: 502 },
     );

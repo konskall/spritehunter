@@ -8,17 +8,22 @@ Mobile-first PWA για πρακτικό σχεδιασμό παρατήρηση
 
 - Ελληνικό responsive dashboard με προαιρετικά αγγλικά στη βασική πλοήγηση.
 - Ακριβής θέση παρατηρητή, GPS με ρητή άδεια και απεριόριστες αποθηκευμένες θέσεις στον browser.
-- Πραγματικά προγνωστικά Open-Meteo για 24 γεωγραφικά σημεία σάρωσης σε όλες τις διευθύνσεις, με CAPE, υετό, νέφωση, ορατότητα και άνεμο.
+- Πραγματικά προγνωστικά Open-Meteo (48 ώρες) για 24 γεωγραφικά σημεία σάρωσης σε όλες τις διευθύνσεις, με CAPE, CIN, Lifted Index, υδρατμούς, υετό, νέφωση, ορατότητα και άνεμο. Η ώρα κάθε στόχου επιλέγεται με βάση την πλήρη βαθμολογία (συμπεριλαμβανομένου του σκοταδιού), όχι μόνο την κορυφή της αστάθειας.
 - Open-Meteo Air Quality (PM10, PM2.5, σκόνη, AOD) με ξεχωριστή προέλευση.
 - RainViewer radar overlay με χρονική σήμανση και υποχρεωτική αναφορά προέλευσης.
+- EUMETSAT MTG-LI κεραυνοί, IR νέφη, ύψος κορυφών και K-index μέσω EUMETView WMS, ως μία εικόνα ανά layer στην προβολή Web Mercator (EPSG:3857) του χάρτη.
+- Πραγματικές παρατηρήσεις METAR/TAF (AviationWeather) από τον πλησιέστερο *φρέσκο* σταθμό και επίσημες προειδοποιήσεις MeteoAlarm Ελλάδας ταξινομημένες κατά εγγύτητα και σοβαρότητα.
+- NOAA SWPC Kp και OVATION για τη λειτουργία σέλαος.
 - Προαιρετικό server-only endpoint Vaisala Xweather, με επικύρωση Zod και όριο ακτίνας 100 km. Χωρίς κλειδιά δεν δημιουργούνται ψεύτικοι κεραυνοί.
 - WGS84 Vincenty inverse/direct, ECEF→ENU και φαινόμενη ανύψωση στόχου στα 50/60/70/80/90 km με καμπυλότητα Γης.
 - OpenTopoData/SRTM 30 m προφίλ εδάφους στον επιλεγμένο τομέα και ταξινόμηση πλήρους/μερικής/μη ορατότητας.
 - Ήλιος, Σελήνη, φωτισμός και γωνιακός διαχωρισμός με SunCalc v2 (αζιμούθιο από αληθή βορρά).
+- Ζωντανή στόχευση με αισθητήρες συσκευής: πλήρης γεωμετρία W3C DeviceOrientation για αζιμούθιο και ανύψωση πίσω κάμερας, με τοπική διόρθωση μαγνητικής απόκλισης NOAA WMM2025.
 - Canon EOS 750D, επεξεργάσιμη συλλογή φακών, πραγματικό οριζόντιο/κάθετο FOV και έλεγχος κάδρου.
 - Πειραματικές φωτογραφικές ρυθμίσεις, χειροκίνητη/αισθητηριακή πυξίδα, Sky View και τοπικό ημερολόγιο με CSV/JSON export.
+- In-app/browser ειδοποιήσεις όσο η εφαρμογή είναι ανοιχτή (επανέλεγχος ανά 15 λεπτά) με όριο δείκτη, ελάχιστη εμπιστοσύνη, cooldown και ώρες ησυχίας.
 - PWA service worker για offline app shell. Οι ζωντανές API κλήσεις παραμένουν network-only.
-- 17 unit tests για γεωδαισία, καμπυλότητα, ορίζοντα, FOV, αστρονομία, DST, παλαιότητα, clustering, scoring και cooldown.
+- 70 unit tests για γεωδαισία, καμπυλότητα, ορίζοντα, FOV, προσανατολισμό συσκευής, WMM, αστρονομία, DST, επιλογή στόχου, scoring, METAR, MeteoAlarm, ειδοποιήσεις, cache, rate limiting και επικύρωση εισόδων.
 
 ## Γρήγορη εκκίνηση
 
@@ -81,7 +86,7 @@ db/                      προαιρετικό Drizzle persistence schema
 tests/                   scientific unit scenarios
 ```
 
-Οι provider routes εφαρμόζουν timeout, retry, Zod validation, server-side secrets και μικρή in-memory cache. Τα API responses περιλαμβάνουν χρόνο ανάκτησης, valid time, είδος δεδομένων και κατάσταση διαθεσιμότητας.
+Οι provider routes εφαρμόζουν timeout με συνολικό χρονικό όριο, retry μόνο σε σφάλματα δικτύου/429/5xx, Zod validation (κενές παράμετροι απορρίπτονται), server-side secrets, in-memory cache με όριο μεγέθους και best-effort rate limiting ανά IP. Τα API responses περιλαμβάνουν χρόνο ανάκτησης, valid time, είδος δεδομένων και κατάσταση διαθεσιμότητας.
 
 ## Κατάσταση φάσεων
 
@@ -92,7 +97,7 @@ tests/                   scientific unit scenarios
 | 3 — Geometry | WGS84/ECEF/ENU + επιλεγμένος DEM τομέας· πλήρες cached 360° DEM δεν έχει υλοποιηθεί |
 | 4 — Photography | Canon 750D, lenses, FOV, settings, compass/manual mode |
 | 5 — Opportunity engine | Explainable score, confidence, ranking, timelines, βασική σύγκριση θέσεων |
-| 6 — Notifications | In-app/browser permission & rules· **όχι ακόμη πραγματικό server push/email/scheduled delivery** |
+| 6 — Notifications | In-app/browser ειδοποιήσεις με κανόνες όσο η εφαρμογή είναι ανοιχτή· **όχι ακόμη server push/email/scheduled delivery** |
 | 7 — Advanced observation | Τοπικό logbook/export· **όχι RAW upload/EXIF/image sequence detector** |
 
 ## Ασφάλεια

@@ -41,6 +41,9 @@ const MIN_ZOOM = 3;
 const MAX_ZOOM = 9;
 const OVERLAY_PADDING = 0.25;
 const OVERLAY_MAX_PX = 2048;
+// EUMETView answers 500/504 for large renders under load; ≤1024 px requests are reliable.
+const OVERLAY_MAX_REQUEST_PX = 1024;
+const OVERLAY_MAX_RETRIES = 2;
 
 export function clampMapZoom(zoom: number) {
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
@@ -87,6 +90,7 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
   const [zoom, setZoom] = useState(4);
   const [overlayView, setOverlayView] = useState<OverlayView | null>(null);
   const [loadedOverlays, setLoadedOverlays] = useState<Set<string>>(() => new Set());
+  const [overlayAttempts, setOverlayAttempts] = useState<Record<string, number>>({});
 
   useEffect(() => {
     const element = containerRef.current;
@@ -176,8 +180,11 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
     ? satelliteLayers.map((layer) => {
       const topLeft = worldPixelToMercator(overlayView.left, overlayView.top, overlayView.zoom);
       const bottomRight = worldPixelToMercator(overlayView.left + overlayView.width, overlayView.top + overlayView.height, overlayView.zoom);
-      const src = eumetsatImageUrl(layer.kind, { minX: topLeft.x, minY: bottomRight.y, maxX: bottomRight.x, maxY: topLeft.y }, overlayView.width, overlayView.height, layer.time);
-      return { ...layer, src };
+      const requestScale = Math.min(1, OVERLAY_MAX_REQUEST_PX / Math.max(overlayView.width, overlayView.height));
+      const baseSrc = eumetsatImageUrl(layer.kind, { minX: topLeft.x, minY: bottomRight.y, maxX: bottomRight.x, maxY: topLeft.y }, overlayView.width * requestScale, overlayView.height * requestScale, layer.time);
+      const attempt = overlayAttempts[baseSrc] ?? 0;
+      // WMS ignores unknown parameters; the counter only makes a retry a distinct request.
+      return { ...layer, baseSrc, attempt, src: attempt ? `${baseSrc}&retry=${attempt}` : baseSrc };
     })
     : [];
   const lightningOverlay = overlayImages.find((image) => image.kind === "lightning");
@@ -237,6 +244,14 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
     if (event.key === "-") { event.preventDefault(); changeZoom(-1); }
   };
   const markLoaded = (src: string) => setLoadedOverlays((current) => (current.has(src) ? current : new Set(current).add(src)));
+  const retryOverlay = (baseSrc: string, attempt: number) => {
+    if (attempt >= OVERLAY_MAX_RETRIES) {
+      setOverlayAttempts((current) => ({ ...current, [baseSrc]: OVERLAY_MAX_RETRIES + 1 }));
+      return;
+    }
+    setTimeout(() => setOverlayAttempts((current) => ({ ...current, [baseSrc]: attempt + 1 })), 2_000 * (attempt + 1));
+  };
+  const overlayFailed = (image: { baseSrc: string }) => (overlayAttempts[image.baseSrc] ?? 0) > OVERLAY_MAX_RETRIES;
 
   return (
     <div
@@ -256,14 +271,14 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
         {scene.tiles.map((tile) => (
           <img key={tile.key} className="map-tile" draggable={false} alt="" src={`https://tile.openstreetmap.org/${zoom}/${tile.x}/${tile.y}.png`} style={{ left: tile.left, top: tile.top }} />
         ))}
-        {overlayView && overlayImages.filter((image) => image.kind !== "lightning").map((image) => (
-          <img key={image.src} className={`wms-image ${image.className}`} draggable={false} alt="" src={image.src} onLoad={() => markLoaded(image.src)} style={{ left: overlayView.left - scene.left, top: overlayView.top - scene.top, width: overlayView.width, height: overlayView.height }} />
+        {overlayView && overlayImages.filter((image) => image.kind !== "lightning" && !overlayFailed(image)).map((image) => (
+          <img key={image.src} className={`wms-image ${image.className}`} draggable={false} alt="" src={image.src} onLoad={() => markLoaded(image.src)} onError={() => retryOverlay(image.baseSrc, image.attempt)} style={{ left: overlayView.left - scene.left, top: overlayView.top - scene.top, width: overlayView.width, height: overlayView.height }} />
         ))}
         {radarVisible && radar && radarFrame && scene.tiles.map((tile) => (
           <img key={`radar-${tile.key}`} className="map-tile radar-tile" draggable={false} alt="" src={`${radar.host}${radarFrame.path}/256/${zoom}/${tile.x}/${tile.y}/2/1_1.png`} style={{ left: tile.left, top: tile.top }} />
         ))}
-        {overlayView && lightningOverlay && (
-          <img key={lightningOverlay.src} className={`wms-image ${lightningOverlay.className}`} draggable={false} alt="" src={lightningOverlay.src} onLoad={() => markLoaded(lightningOverlay.src)} style={{ left: overlayView.left - scene.left, top: overlayView.top - scene.top, width: overlayView.width, height: overlayView.height }} />
+        {overlayView && lightningOverlay && !overlayFailed(lightningOverlay) && (
+          <img key={lightningOverlay.src} className={`wms-image ${lightningOverlay.className}`} draggable={false} alt="" src={lightningOverlay.src} onLoad={() => markLoaded(lightningOverlay.src)} onError={() => retryOverlay(lightningOverlay.baseSrc, lightningOverlay.attempt)} style={{ left: overlayView.left - scene.left, top: overlayView.top - scene.top, width: overlayView.width, height: overlayView.height }} />
         )}
       </div>
       <svg className="map-overlay" width={size.width} height={size.height} viewBox={`0 0 ${size.width} ${size.height}`}>
@@ -287,7 +302,7 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
       </div>
       <div className="map-status">
         <span>Zoom: κουμπιά · ροδέλα · pinch</span>
-        {lightningVisible && <span>{lightningOverlay && !loadedOverlays.has(lightningOverlay.src) ? "MTG-LI φορτώνει…" : satelliteLabel(eumetsat)}</span>}
+        {lightningVisible && <span>{lightningOverlay && overlayFailed(lightningOverlay) ? "MTG-LI προσωρινά μη διαθέσιμο (EUMETView)" : lightningOverlay && !loadedOverlays.has(lightningOverlay.src) ? "MTG-LI φορτώνει…" : satelliteLabel(eumetsat)}</span>}
         <span>{radarVisible ? radarLabel(radar) : "Radar κρυφό"}</span>
       </div>
     </div>

@@ -545,6 +545,14 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
   data: OpportunityResponse | null; candidates: StormCandidate[]; selected: StormCandidate | null; loading: boolean; error: string | null; observer: SavedLocation; language: Language; eumetsat: EumetsatMetadata | null; radarStatus: DataStatus; onPoint: () => void; onMap: () => void; onSelect: (id: string) => void;
 }) {
   const t = strings[language];
+  // The clock renders only after mount: a server-rendered time differs from the client's
+  // whenever a minute boundary falls between them, which broke hydration.
+  const [clock, setClock] = useState<number | null>(null);
+  useEffect(() => {
+    setClock(Date.now());
+    const timer = setInterval(() => setClock(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
   const referenceTime = data ? new Date(data.fetchedAt).getTime() : 0;
   const nowHour = data?.observerForecast.find((hour) => new Date(hour.time).getTime() >= referenceTime) ?? data?.observerForecast[0];
   const airNow = data?.airQuality.find((hour) => new Date(hour.time).getTime() >= referenceTime - 30 * 60_000);
@@ -559,7 +567,7 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
   return (
     <div className="view-stack">
       <section className="hero-panel">
-        <div className="eyebrow"><span className="live-pulse" /> NIGHT WATCH · {formatAthens(new Date(), language)}</div>
+        <div className="eyebrow"><span className="live-pulse" /> NIGHT WATCH · {clock ? formatAthens(new Date(clock), language) : "—"}</div>
         <div className="hero-grid">
           <div className="hero-copy">
             <span className={`opportunity-kicker ${selected ? `category-${selected.score.category}` : ""}`}>{loading && !data ? "Σάρωση Μεσογείου…" : error ? t.insufficient : categoryLabel(selected, language)}</span>
@@ -599,7 +607,7 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
           <div className="panel-heading"><div><span className="eyebrow">OBSERVER SKY</span><h2>Ο ουρανός πάνω από {observer.name.split("—")[0]}</h2></div><Eye size={20} /></div>
           <div className="mini-timeline">
             {(data?.observerForecast ?? []).filter((hour) => new Date(hour.time).getTime() >= referenceTime).slice(0, 10).map((hour) => (
-              <div key={hour.time} className="timeline-hour"><span>{new Intl.DateTimeFormat("el-GR", { timeZone: "Europe/Athens", hour: "2-digit" }).format(new Date(hour.time))}</span><div className="cloud-bar"><i style={{ height: `${Math.max(8, hour.cloudCoverHigh ?? 0)}%` }} /></div><strong>{hour.cloudCoverHigh ?? "—"}%</strong></div>
+              <div key={hour.time} className="timeline-hour"><span>{new Intl.DateTimeFormat("el-GR", { timeZone: "Europe/Athens", hour: "2-digit", hourCycle: "h23" }).format(new Date(hour.time))}</span><div className="cloud-bar"><i style={{ height: `${Math.max(8, hour.cloudCoverHigh ?? 0)}%` }} /></div><strong>{hour.cloudCoverHigh ?? "—"}%</strong></div>
             ))}
           </div>
           <p className="timeline-legend">Ύψος στήλης = πρόγνωση υψηλής νέφωσης (%). Χαμηλότερες στήλες σημαίνουν πιο καθαρή ανώτερη ατμόσφαιρα.</p>
