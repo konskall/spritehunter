@@ -1,8 +1,9 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect */
+/* eslint-disable @next/next/no-img-element -- small pre-sized brand PNGs and a live third-party NOAA image that must not be re-encoded */
 
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type InputHTMLAttributes } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -55,6 +56,12 @@ import { skyState } from "@/lib/astronomy";
 import { terrainVisibility } from "@/lib/terrain";
 import { formatAthens } from "@/lib/time";
 import { magneticDeclination, normalizeBearing } from "@/lib/wmm";
+import { cameraPointing } from "@/lib/orientation";
+import { parseNumericDraft } from "@/lib/number-input";
+import { rescoreWithTerrain } from "@/lib/scoring";
+import { evaluateAlert, type AlertPreferences } from "@/lib/notifications";
+import { isAlertPrefs, isArray, isLanguage, isLastAlert, isLensList, isLocationList, isOrientation, isSavedLocation, isSearchRange, isString } from "@/lib/persisted-validators";
+import { PwaInstallButton } from "@/components/PwaRegister";
 
 const StormMap = dynamic(() => import("@/components/StormMap"), { ssr: false });
 
@@ -132,24 +139,96 @@ const strings = {
   },
 };
 
-function safeRead<T>(key: string, fallback: T): T {
+const DEFAULT_ALERT_PREFS: AlertPreferences = { minimumScore: 60, confidence: "medium", cooldown: 90, quietStart: "01:00", quietEnd: "08:00" };
+// Without observed lightning the score is capped at 69, so higher thresholds could never fire.
+const MAX_FORECAST_SCORE = 69;
+const AUTO_REFRESH_MS = 15 * 60_000;
+const LOCATION_DEBOUNCE_MS = 700;
+
+function safeRead<T>(key: string, fallback: T, validate?: (value: unknown) => value is T): T {
   if (typeof window === "undefined") return fallback;
   try {
     const value = window.localStorage.getItem(key);
-    return value ? (JSON.parse(value) as T) : fallback;
+    if (!value) return fallback;
+    const parsed: unknown = JSON.parse(value);
+    // Invalid stored state (e.g. a mistyped latitude) must not keep the app broken after reload.
+    return !validate || validate(parsed) ? (parsed as T) : fallback;
   } catch {
     return fallback;
   }
 }
 
-function usePersistedState<T>(key: string, fallback: T) {
-  const [value, setValue] = useState(fallback);
+/** localStorage-backed state; `hydrated` turns true once the stored value has been read. */
+function usePersistedState<T>(key: string, fallback: T, validate?: (value: unknown) => value is T) {
+  const [state, setState] = useState({ value: fallback, hydrated: false });
   const fallbackRef = useRef(fallback);
-  useEffect(() => setValue(safeRead(key, fallbackRef.current)), [key]);
+  const validateRef = useRef(validate);
+  useEffect(() => setState({ value: safeRead(key, fallbackRef.current, validateRef.current), hydrated: true }), [key]);
   useEffect(() => {
-    try { window.localStorage.setItem(key, JSON.stringify(value)); } catch { /* Storage can be disabled. */ }
-  }, [key, value]);
-  return [value, setValue] as const;
+    if (!state.hydrated) return;
+    try { window.localStorage.setItem(key, JSON.stringify(state.value)); } catch { /* Storage can be disabled. */ }
+  }, [key, state]);
+  const setValue = useCallback((next: T | ((current: T) => T)) => {
+    setState((current) => ({ hydrated: current.hydrated, value: typeof next === "function" ? (next as (current: T) => T)(current.value) : next }));
+  }, []);
+  return [state.value, setValue, state.hydrated] as const;
+}
+
+type NumberFieldProps = Omit<InputHTMLAttributes<HTMLInputElement>, "value" | "onChange" | "type" | "min" | "max"> & {
+  value: number;
+  onCommit: (value: number) => void;
+  min?: number;
+  max?: number;
+  isValid?: (value: number) => boolean;
+};
+
+/**
+ * Keeps the typed text separate from the committed number, so intermediate input such
+ * as "38." or "-" is not coerced to 0 (which previously turned "38.2466" into 2466).
+ */
+function NumberField({ value, onCommit, min, max, isValid, onFocus, onBlur, ...rest }: NumberFieldProps) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const parse = (text: string) => {
+    const parsed = parseNumericDraft(text, min, max);
+    return parsed != null && (!isValid || isValid(parsed)) ? parsed : null;
+  };
+  const invalid = draft != null && parse(draft) == null;
+  return (
+    <input
+      {...rest}
+      type="text"
+      inputMode={min != null && min < 0 ? "text" : "decimal"}
+      autoComplete="off"
+      value={draft ?? String(value)}
+      aria-invalid={invalid || undefined}
+      onFocus={(event) => { setDraft(String(value)); onFocus?.(event); }}
+      onBlur={(event) => { setDraft(null); onBlur?.(event); }}
+      onChange={(event) => {
+        setDraft(event.target.value);
+        const parsed = parse(event.target.value);
+        if (parsed != null && parsed !== value) onCommit(parsed);
+      }}
+    />
+  );
+}
+
+function relativeHours(iso: string, now: number) {
+  const hours = Math.round((new Date(iso).getTime() - now) / 3_600_000);
+  if (hours <= 0) return "τώρα";
+  return hours === 1 ? "σε 1 ώρα" : `σε ${hours} ώρες`;
+}
+
+async function showBrowserNotification(title: string, body: string) {
+  const options = { body, icon: "/spritehunter-icon-192.png", tag: "spritehunter-opportunity" };
+  try {
+    // Android Chrome only allows notifications through a service worker registration.
+    const registration = await navigator.serviceWorker?.getRegistration();
+    if (registration) {
+      await registration.showNotification(title, options);
+      return;
+    }
+    new Notification(title, options);
+  } catch { /* Notifications can be blocked by the platform. */ }
 }
 
 function directionLabel(degrees: number, language: Language) {
@@ -209,14 +288,16 @@ function Metric({ label, value, hint, icon: Icon }: { label: string; value: stri
 
 export default function SpriteHunterApp() {
   const [screen, setScreen] = useState<Screen>("dashboard");
-  const [language, setLanguage] = usePersistedState<Language>("spritehunter.language", "el");
-  const [locations, setLocations] = usePersistedState<SavedLocation[]>("spritehunter.locations", [DEFAULT_LOCATION]);
-  const [observer, setObserver] = usePersistedState<SavedLocation>("spritehunter.observer", DEFAULT_LOCATION);
-  const [lenses, setLenses] = usePersistedState<LensProfile[]>("spritehunter.lenses.v2", DEFAULT_LENSES);
-  const [selectedLensId, setSelectedLensId] = usePersistedState("spritehunter.selected-lens.v2", "tokina-atxi-11-16");
-  const [orientation, setOrientation] = usePersistedState<"landscape" | "portrait">("spritehunter.orientation", "landscape");
-  const [logs, setLogs] = usePersistedState<LogEntry[]>("spritehunter.logs", []);
-  const [range, setRange] = usePersistedState("spritehunter.range", { min: 200, max: 600 });
+  const [language, setLanguage] = usePersistedState<Language>("spritehunter.language", "el", isLanguage);
+  const [locations, setLocations] = usePersistedState<SavedLocation[]>("spritehunter.locations", [DEFAULT_LOCATION], isLocationList);
+  const [observer, setObserver, observerHydrated] = usePersistedState<SavedLocation>("spritehunter.observer", DEFAULT_LOCATION, isSavedLocation);
+  const [lenses, setLenses] = usePersistedState<LensProfile[]>("spritehunter.lenses.v2", DEFAULT_LENSES, isLensList);
+  const [selectedLensId, setSelectedLensId] = usePersistedState("spritehunter.selected-lens.v2", "tokina-atxi-11-16", isString);
+  const [orientation, setOrientation] = usePersistedState<"landscape" | "portrait">("spritehunter.orientation", "landscape", isOrientation);
+  const [logs, setLogs] = usePersistedState<LogEntry[]>("spritehunter.logs", [], isArray<LogEntry>);
+  const [range, setRange, rangeHydrated] = usePersistedState("spritehunter.range", { min: 200, max: 600 }, isSearchRange);
+  const [alertPrefs, setAlertPrefs] = usePersistedState<AlertPreferences>("spritehunter.alerts", DEFAULT_ALERT_PREFS, isAlertPrefs);
+  const [lastAlert, setLastAlert] = usePersistedState<{ at: string; score: number } | null>("spritehunter.last-alert", null, isLastAlert);
   const [data, setData] = useState<OpportunityResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -233,9 +314,26 @@ export default function SpriteHunterApp() {
   const [instabilityVisible, setInstabilityVisible] = useState(false);
   const [ringsVisible, setRingsVisible] = useState(true);
   const [aurora, setAurora] = useState<AuroraResponse | null>(null);
-  const [auroraLoading, setAuroraLoading] = useState(true);
+  const [auroraLoading, setAuroraLoading] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
+  const requestRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
+  const loadedOnceRef = useRef(false);
+  const mobileNavRef = useRef<HTMLElement>(null);
+  const hydrated = observerHydrated && rangeHydrated;
   const t = strings[language];
-  const selected = data?.candidates.find((candidate) => candidate.id === selectedId) ?? data?.candidates[0] ?? null;
+
+  const rawSelected = data?.candidates.find((candidate) => candidate.id === selectedId) ?? data?.candidates[0] ?? null;
+  // Once the DEM line of sight for the selected bearing is known, re-score that target so
+  // the terrain component and confidence reflect the verified horizon everywhere it is shown.
+  const selected = useMemo(() => {
+    if (!rawSelected?.scoreInput || !terrain || Math.abs(terrain.bearingDeg - rawSelected.bearingDeg) > 0.05) return rawSelected;
+    const visibility = terrainVisibility(terrain, rawSelected.pointing);
+    return visibility.status === "unknown" ? rawSelected : { ...rawSelected, score: rescoreWithTerrain(rawSelected.scoreInput, visibility.status) };
+  }, [rawSelected, terrain]);
+  const candidates = useMemo(
+    () => (data?.candidates ?? []).map((candidate) => (selected && candidate.id === selected.id ? selected : candidate)),
+    [data, selected],
+  );
   const selectedLens = lenses.find((lens) => lens.id === selectedLensId) ?? lenses[0];
   const fov = fieldOfView(CANON_750D, selectedLens.focalLengthMm, orientation);
   const uncertaintyAngle = selected ? (Math.atan2(selected.uncertaintyKm, selected.distanceKm) * 180) / Math.PI * 2 : 0;
@@ -245,24 +343,38 @@ export default function SpriteHunterApp() {
   const currentSky = selected ? skyState(new Date(selected.forecastValidAt), observer.latitude, observer.longitude, selected.bearingDeg) : null;
 
   const refresh = useCallback(async () => {
+    // Only the newest scan may update the screen; older in-flight requests are aborted or ignored.
+    const id = requestRef.current.id + 1;
+    requestRef.current.controller?.abort();
+    const controller = new AbortController();
+    requestRef.current = { id, controller };
+    const isCurrent = () => requestRef.current.id === id;
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams({
         lat: observer.latitude.toString(), lon: observer.longitude.toString(), elevation: String(observer.elevationM ?? 0), minKm: String(range.min), maxKm: String(range.max),
       });
-      let payload: OpportunityResponse;
+      let response: Response | null = null;
       try {
-        const response = await fetch(`/api/opportunities?${params}`);
+        response = await fetch(`/api/opportunities?${params}`, { signal: controller.signal });
+      } catch {
+        if (controller.signal.aborted) return;
+      }
+      let payload: OpportunityResponse;
+      if (response && response.status < 500) {
         const serverPayload = (await response.json()) as OpportunityResponse & { error?: string };
+        // Client errors (invalid input, rate limit) are reported, not retried from the browser.
         if (!response.ok) throw new Error(serverPayload.error ?? "Αποτυχία ανάκτησης μετεωρολογικών δεδομένων.");
         payload = serverPayload;
-      } catch (serverError) {
+      } else {
+        // The server is unreachable or its upstream failed: query the keyless forecast directly.
         const { fetchOpportunities } = await import("@/lib/providers/open-meteo");
         const directPayload = await fetchOpportunities(
           { latitude: observer.latitude, longitude: observer.longitude, elevationM: observer.elevationM },
           range.min,
           range.max,
+          { serverOnlySources: false },
         );
         payload = {
           ...directPayload,
@@ -271,20 +383,34 @@ export default function SpriteHunterApp() {
             : provider),
           warnings: [
             ...directPayload.warnings,
-            `Το server API δεν απάντησε· χρησιμοποιήθηκε ασφαλές browser fallback χωρίς κλειδί API (${serverError instanceof Error ? serverError.message : "άγνωστο σφάλμα"}).`,
+            `Το server API δεν απάντησε (${response ? `HTTP ${response.status}` : "σφάλμα δικτύου"})· χρησιμοποιήθηκε browser fallback χωρίς METAR και MeteoAlarm.`,
           ],
         };
       }
+      if (!isCurrent()) return;
+      loadedOnceRef.current = true;
       setData(payload);
       setSelectedId((current) => payload.candidates.some((candidate) => candidate.id === current) ? current : payload.candidates[0]?.id ?? null);
     } catch (refreshError) {
+      if (!isCurrent() || controller.signal.aborted) return;
       setError(refreshError instanceof Error ? refreshError.message : "Άγνωστο σφάλμα δεδομένων.");
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [observer.latitude, observer.longitude, observer.elevationM, range.min, range.max]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  // Wait for the stored location before the first scan, then debounce edits to location and range.
+  useEffect(() => {
+    if (!hydrated) return;
+    const timer = setTimeout(refresh, loadedOnceRef.current ? LOCATION_DEBOUNCE_MS : 0);
+    return () => clearTimeout(timer);
+  }, [refresh, hydrated]);
+  // While the app is open, rescan at the provider cache period so alerts can fire.
+  useEffect(() => {
+    if (!hydrated) return;
+    const timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, AUTO_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [refresh, hydrated]);
   useEffect(() => {
     fetch("/api/radar").then(async (response) => {
       if (!response.ok) throw new Error("Radar unavailable");
@@ -295,8 +421,12 @@ export default function SpriteHunterApp() {
       const payload = (await response.json()) as EumetsatMetadata;
       setEumetsat(payload);
     }).catch(() => setEumetsat(null));
+    setNotificationPermission(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
   }, []);
+  // Space weather is only needed on the aurora screen.
+  const auroraActive = screen === "aurora";
   useEffect(() => {
+    if (!auroraActive || !hydrated) return;
     const controller = new AbortController();
     setAuroraLoading(true);
     const params = new URLSearchParams({ lat: observer.latitude.toString(), lon: observer.longitude.toString() });
@@ -309,26 +439,52 @@ export default function SpriteHunterApp() {
       .catch((requestError) => {
         if ((requestError as Error).name !== "AbortError") setAurora(null);
       })
-      .finally(() => setAuroraLoading(false));
+      .finally(() => { if (!controller.signal.aborted) setAuroraLoading(false); });
     return () => controller.abort();
-  }, [observer.latitude, observer.longitude]);
+  }, [auroraActive, hydrated, observer.latitude, observer.longitude]);
+  const terrainBearing = rawSelected?.bearingDeg ?? null;
   useEffect(() => {
-    if (!selected) { setTerrain(null); return; }
+    if (terrainBearing == null || !hydrated) { setTerrain(null); return; }
     const controller = new AbortController();
     setTerrainLoading(true);
-    const params = new URLSearchParams({ lat: observer.latitude.toString(), lon: observer.longitude.toString(), bearing: selected.bearingDeg.toString(), cameraHeight: observer.cameraHeightM.toString() });
+    const params = new URLSearchParams({ lat: observer.latitude.toString(), lon: observer.longitude.toString(), bearing: terrainBearing.toString(), cameraHeight: observer.cameraHeightM.toString() });
     fetch(`/api/terrain?${params}`, { signal: controller.signal })
-      .then(async (response) => (await response.json()) as TerrainProfile)
-      .then(setTerrain)
+      .then(async (response) => {
+        const payload = (await response.json()) as TerrainProfile;
+        setTerrain(response.ok ? payload : null);
+      })
       .catch((terrainError) => {
         if ((terrainError as Error).name !== "AbortError") setTerrain(null);
       })
-      .finally(() => setTerrainLoading(false));
+      .finally(() => { if (!controller.signal.aborted) setTerrainLoading(false); });
     return () => controller.abort();
-  }, [selected, observer.latitude, observer.longitude, observer.cameraHeightM]);
+  }, [terrainBearing, hydrated, observer.latitude, observer.longitude, observer.cameraHeightM]);
+  // In-app watch: notify when the best target passes the user's rules.
+  const topCandidate = data?.candidates[0] ?? null;
+  useEffect(() => {
+    if (!topCandidate || notificationPermission !== "granted") return;
+    const now = new Date();
+    if (!evaluateAlert({ score: topCandidate.score.total, confidence: topCandidate.score.confidence, last: lastAlert, prefs: alertPrefs, now })) return;
+    setLastAlert({ at: now.toISOString(), score: topCandidate.score.total });
+    void showBrowserNotification(
+      `SpriteHunter · δείκτης ${topCandidate.score.total}/100`,
+      `Προγνωστική κυψέλη ${topCandidate.distanceKm.toFixed(0)} km προς ${directionLabel(topCandidate.bearingDeg, "el")} για ${formatAthens(topCandidate.forecastValidAt)}. Δεν έχει επιβεβαιωθεί ηλεκτρική δραστηριότητα.`,
+    );
+  }, [topCandidate, notificationPermission, lastAlert, alertPrefs, setLastAlert]);
+  // Keep the active item visible in the horizontally scrolling mobile navigation.
+  useEffect(() => {
+    const nav = mobileNavRef.current;
+    const active = nav?.querySelector<HTMLElement>("button.active");
+    if (!nav || !active) return;
+    nav.scrollTo({ left: active.offsetLeft - nav.clientWidth / 2 + active.clientWidth / 2, behavior: "smooth" });
+  }, [screen]);
 
   const selectCandidate = (id: string) => setSelectedId(id);
   const goPoint = () => setScreen("point");
+  const requestNotifications = async () => {
+    if (typeof Notification === "undefined") return;
+    setNotificationPermission(await Notification.requestPermission());
+  };
 
   return (
     <div className="app-shell">
@@ -344,7 +500,7 @@ export default function SpriteHunterApp() {
         </nav>
         <div className="sidebar-foot">
           <div className="source-mini"><StatusDot status={error ? "unavailable" : loading ? "stale" : "available"} /><span>{loading ? "Έλεγχος πηγών…" : error ? "Σφάλμα παρόχου" : "Ζωντανά μοντέλα"}</span></div>
-          <p>v0.3 · installable PWA</p>
+          <p>v0.4 · installable PWA</p>
         </div>
       </aside>
 
@@ -357,41 +513,46 @@ export default function SpriteHunterApp() {
             <span className="coordinate">{observer.latitude.toFixed(4)}°, {observer.longitude.toFixed(4)}°</span>
           </div>
           <div className="top-actions">
-            <button className="icon-button" title="Αλλαγή γλώσσας" onClick={() => setLanguage(language === "el" ? "en" : "el")}><Languages size={18} /><span>{language.toUpperCase()}</span></button>
-            <button className="refresh-button" onClick={refresh} disabled={loading}><RefreshCw size={17} className={loading ? "spin" : ""} /><span>{t.refresh}</span></button>
+            <PwaInstallButton />
+            <button className="icon-button" title="Αλλαγή γλώσσας" aria-label="Αλλαγή γλώσσας" onClick={() => setLanguage(language === "el" ? "en" : "el")}><Languages size={18} /><span>{language.toUpperCase()}</span></button>
+            <button className="refresh-button" onClick={refresh} disabled={loading} aria-label={t.refresh}><RefreshCw size={17} className={loading ? "spin" : ""} /><span>{t.refresh}</span></button>
           </div>
         </header>
 
         <div className="content">
-          {screen === "dashboard" && <DashboardView data={data} selected={selected} loading={loading} error={error} observer={observer} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onPoint={goPoint} onMap={() => setScreen("map")} onSelect={selectCandidate} />}
-          {screen === "map" && <MapView data={data} selected={selected} observer={observer} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onRadar={setRadarVisible} onLightning={setLightningVisible} onInfrared={setInfraredVisible} onCloudTop={setCloudTopVisible} onInstability={setInstabilityVisible} onRings={setRingsVisible} onSelect={selectCandidate} onPoint={goPoint} />}
-          {screen === "forecast" && <ForecastView data={data} selected={selected} onSelect={selectCandidate} onPoint={goPoint} />}
+          {screen === "dashboard" && <DashboardView data={data} candidates={candidates} selected={selected} loading={loading} error={error} observer={observer} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onPoint={goPoint} onMap={() => setScreen("map")} onSelect={selectCandidate} />}
+          {screen === "map" && <MapView candidates={candidates} selected={selected} observer={observer} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onRadar={setRadarVisible} onLightning={setLightningVisible} onInfrared={setInfraredVisible} onCloudTop={setCloudTopVisible} onInstability={setInstabilityVisible} onRings={setRingsVisible} onSelect={selectCandidate} onPoint={goPoint} />}
+          {screen === "forecast" && <ForecastView candidates={candidates} selected={selected} onSelect={selectCandidate} onPoint={goPoint} />}
           {screen === "point" && <PointView candidate={selected} observer={observer} lens={selectedLens} fov={fov} framing={framing} terrain={terrain} terrainLoading={terrainLoading} sky={currentSky} language={language} />}
           {screen === "sky" && <SkyView candidate={selected} terrain={terrain} fov={fov} lens={selectedLens} orientation={orientation} sky={currentSky} onOrientation={setOrientation} />}
           {screen === "aurora" && <AuroraView aurora={aurora} loading={auroraLoading} lens={selectedLens} observer={observer} forecast={data?.observerForecast ?? []} />}
           {screen === "locations" && <LocationsView observer={observer} locations={locations} candidate={selected} onObserver={setObserver} onLocations={setLocations} />}
           {screen === "camera" && <CameraView candidate={selected} lenses={lenses} selectedLens={selectedLens} fov={fov} framing={framing} orientation={orientation} sky={currentSky} onSelect={setSelectedLensId} onLenses={setLenses} onOrientation={setOrientation} />}
           {screen === "logbook" && <LogbookView logs={logs} candidate={selected} lens={selectedLens} onLogs={setLogs} />}
-          {screen === "alerts" && <AlertsView candidate={selected} />}
+          {screen === "alerts" && <AlertsView candidate={topCandidate} prefs={alertPrefs} lastAlert={lastAlert} permission={notificationPermission} onPrefs={setAlertPrefs} onRequestPermission={requestNotifications} />}
           {screen === "settings" && <SettingsView observer={observer} range={range} data={data} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onObserver={setObserver} onRange={setRange} onLanguage={setLanguage} onRefresh={refresh} />}
         </div>
       </main>
 
-      <nav className="mobile-nav" aria-label="Πλοήγηση κινητού">
+      <nav ref={mobileNavRef} className="mobile-nav" aria-label="Πλοήγηση κινητού">
         {navItems.map((item) => { const Icon = item.icon; return <button key={item.id} className={screen === item.id ? "active" : ""} onClick={() => setScreen(item.id)}><Icon size={19} /><span>{language === "el" ? item.label : item.labelEn}</span></button>; })}
       </nav>
     </div>
   );
 }
 
-function DashboardView({ data, selected, loading, error, observer, language, eumetsat, radarStatus, onPoint, onMap, onSelect }: {
-  data: OpportunityResponse | null; selected: StormCandidate | null; loading: boolean; error: string | null; observer: SavedLocation; language: Language; eumetsat: EumetsatMetadata | null; radarStatus: DataStatus; onPoint: () => void; onMap: () => void; onSelect: (id: string) => void;
+function DashboardView({ data, candidates, selected, loading, error, observer, language, eumetsat, radarStatus, onPoint, onMap, onSelect }: {
+  data: OpportunityResponse | null; candidates: StormCandidate[]; selected: StormCandidate | null; loading: boolean; error: string | null; observer: SavedLocation; language: Language; eumetsat: EumetsatMetadata | null; radarStatus: DataStatus; onPoint: () => void; onMap: () => void; onSelect: (id: string) => void;
 }) {
   const t = strings[language];
   const referenceTime = data ? new Date(data.fetchedAt).getTime() : 0;
   const nowHour = data?.observerForecast.find((hour) => new Date(hour.time).getTime() >= referenceTime) ?? data?.observerForecast[0];
+  const airNow = data?.airQuality.find((hour) => new Date(hour.time).getTime() >= referenceTime - 30 * 60_000);
   const aviation = data?.aviation;
-  const observedSky = aviation && aviation.status !== "unavailable" ? aviation : null;
+  // Only a fresh report counts as an observation; a stale METAR is shown as such in the field panel.
+  const observedSky = aviation?.status === "available" && aviation.cloudCoverPercent != null ? aviation : null;
+  const alerts = data?.weatherAlerts;
+  const alertTotal = alerts?.totalCount ?? alerts?.alerts.length ?? 0;
   const providers = (data?.providers ?? []).map((provider) => provider.id === "rainviewer"
     ? { ...provider, status: radarStatus, message: radarStatus === "available" ? "Live metadata διαθέσιμα· η γεωγραφική κάλυψη παραμένει best-effort." : "Το live radar metadata δεν απάντησε τώρα." }
     : provider);
@@ -401,8 +562,9 @@ function DashboardView({ data, selected, loading, error, observer, language, eum
         <div className="eyebrow"><span className="live-pulse" /> NIGHT WATCH · {formatAthens(new Date(), language)}</div>
         <div className="hero-grid">
           <div className="hero-copy">
-            <span className={`opportunity-kicker ${selected ? `category-${selected.score.category}` : ""}`}>{loading ? "Σάρωση Μεσογείου…" : error ? t.insufficient : categoryLabel(selected, language)}</span>
+            <span className={`opportunity-kicker ${selected ? `category-${selected.score.category}` : ""}`}>{loading && !data ? "Σάρωση Μεσογείου…" : error ? t.insufficient : categoryLabel(selected, language)}</span>
             <h1>{selected ? `Προγνωστική κυψέλη προς ${directionLabel(selected.bearingDeg, language)}` : t.noOpportunity}</h1>
+            {selected && <p className="hero-valid-time"><CalendarClock size={16} />Ισχύει {formatAthens(selected.forecastValidAt, language)} · {relativeHours(selected.forecastValidAt, referenceTime)}</p>}
             <p>{selected ? "Μακρινή περιοχή μοντέλου με συνδυασμό αστάθειας και υετού. Απαιτείται επιβεβαίωση κεραυνικής δραστηριότητας πριν θεωρηθεί ενεργή καταιγίδα." : "Η εφαρμογή θα συνεχίσει να ελέγχει πραγματικά προγνωστικά δεδομένα. Δεν δημιουργούνται τεχνητές καταιγίδες όταν δεν υπάρχει σήμα."}</p>
             {error && <div className="inline-error"><AlertTriangle size={17} />{error}</div>}
             <div className="hero-actions">
@@ -418,17 +580,17 @@ function DashboardView({ data, selected, loading, error, observer, language, eum
         <div className="hero-metrics">
           <Metric icon={Navigation} label="Αληθές αζιμούθιο" value={selected ? `${selected.bearingDeg.toFixed(1)}° · ${directionLabel(selected.bearingDeg, language)}` : "—"} />
           <Metric icon={Gauge} label="Απόσταση" value={selected ? `${selected.distanceKm.toFixed(0)} km` : "—"} hint="γεωδαιτική WGS84" />
-          <Metric icon={Cloud} label={observedSky ? "Παρατηρούμενη νέφωση" : "Υψηλή νέφωση εδώ"} value={observedSky?.cloudCoverPercent != null ? `${observedSky.cloudCoverPercent}%` : nowHour?.cloudCoverHigh != null ? `${nowHour.cloudCoverHigh}%` : "—"} hint={observedSky ? `METAR ${observedSky.stationId} · ${observedSky.distanceKm} km` : "πρόγνωση μοντέλου"} />
+          <Metric icon={Cloud} label={observedSky ? "Χαμηλή νέφωση (METAR)" : "Υψηλή νέφωση εδώ"} value={observedSky ? `${observedSky.cloudCoverPercent}%` : nowHour?.cloudCoverHigh != null ? `${nowHour.cloudCoverHigh}%` : "—"} hint={observedSky ? `${observedSky.stationId} · ${observedSky.distanceKm} km · υψηλή ${nowHour?.cloudCoverHigh ?? "—"}%` : "πρόγνωση μοντέλου"} />
           <Metric icon={Moon} label="Χρήσιμη ανύψωση" value={selected ? `${selected.pointing[0].elevationDeg.toFixed(1)}°–${selected.pointing.at(-1)!.elevationDeg.toFixed(1)}°` : "—"} hint="50–90 km" />
         </div>
       </section>
 
       <div className="dashboard-grid">
         <section className="panel candidates-panel">
-          <div className="panel-heading"><div><span className="eyebrow">RANKED TARGETS</span><h2>Καλύτεροι προγνωστικοί στόχοι</h2></div><span className="count-badge">{data?.candidates.length ?? 0}</span></div>
-          {data?.candidates.length ? <div className="candidate-list">{data.candidates.slice(0, 5).map((candidate, index) => (
+          <div className="panel-heading"><div><span className="eyebrow">RANKED TARGETS</span><h2>Καλύτεροι προγνωστικοί στόχοι</h2></div><span className="count-badge">{candidates.length}</span></div>
+          {candidates.length ? <div className="candidate-list">{candidates.slice(0, 5).map((candidate, index) => (
             <button key={candidate.id} className={`candidate-row ${selected?.id === candidate.id ? "selected" : ""}`} onClick={() => onSelect(candidate.id)}>
-              <span className="rank">0{index + 1}</span><span className="candidate-main"><strong>{directionLabel(candidate.bearingDeg, language)} · {candidate.distanceKm.toFixed(0)} km</strong><small>{formatAthens(candidate.forecastValidAt, language)} · CAPE {candidate.capeJkg?.toFixed(0) ?? "—"} J/kg · LPI {candidate.lightningPotentialJkg?.toFixed(0) ?? "—"}</small></span><span className="candidate-score">{candidate.score.total}</span><ChevronRight size={17} />
+              <span className="rank">0{index + 1}</span><span className="candidate-main"><strong>{directionLabel(candidate.bearingDeg, language)} · {candidate.distanceKm.toFixed(0)} km</strong><small>{formatAthens(candidate.forecastValidAt, language)} · CAPE {candidate.capeJkg?.toFixed(0) ?? "—"} J/kg{candidate.lightningPotentialJkg != null ? ` · LPI ${candidate.lightningPotentialJkg.toFixed(0)}` : ""}</small></span><span className="candidate-score">{candidate.score.total}</span><ChevronRight size={17} />
             </button>
           ))}</div> : <EmptyState title={loading ? "Σάρωση σε εξέλιξη" : "Καμία κατάλληλη προγνωστική κυψέλη"} description="Το κενό αποτέλεσμα είναι έγκυρο: υψηλό CAPE μόνο του δεν αρκεί για σύσταση." />}
         </section>
@@ -440,7 +602,8 @@ function DashboardView({ data, selected, loading, error, observer, language, eum
               <div key={hour.time} className="timeline-hour"><span>{new Intl.DateTimeFormat("el-GR", { timeZone: "Europe/Athens", hour: "2-digit" }).format(new Date(hour.time))}</span><div className="cloud-bar"><i style={{ height: `${Math.max(8, hour.cloudCoverHigh ?? 0)}%` }} /></div><strong>{hour.cloudCoverHigh ?? "—"}%</strong></div>
             ))}
           </div>
-          <div className="timeline-legend"><span><i className="legend-clear" />χαμηλή υψηλή νέφωση</span><span><i className="legend-cloud" />κλειστός ουρανός</span></div>
+          <p className="timeline-legend">Ύψος στήλης = πρόγνωση υψηλής νέφωσης (%). Χαμηλότερες στήλες σημαίνουν πιο καθαρή ανώτερη ατμόσφαιρα.</p>
+          {airNow && <p className="air-quality-line"><Wind size={14} />AOD {airNow.aerosolOpticalDepth?.toFixed(2) ?? "—"} · σκόνη {airNow.dust?.toFixed(0) ?? "—"} µg/m³ · PM10 {airNow.pm10?.toFixed(0) ?? "—"} µg/m³ <small>CAMS πρόγνωση</small></p>}
         </section>
 
         <section className="panel field-intel-panel">
@@ -449,15 +612,15 @@ function DashboardView({ data, selected, loading, error, observer, language, eum
             <article>
               <div><span>METAR / TAF</span><StatusDot status={aviation?.status ?? "stale"} /></div>
               <strong>{aviation?.stationId ? `${aviation.stationId} · ${aviation.distanceKm} km` : "Χωρίς κοντινή παρατήρηση"}</strong>
-              <p>{aviation?.cloudSummary ?? aviation?.message ?? "Αναμονή για AviationWeather…"}</p>
+              <p>{aviation?.status === "stale" ? aviation.message : aviation?.cloudSummary ?? aviation?.message ?? "Αναμονή για AviationWeather…"}</p>
               {aviation?.visibilityM != null && <small>Ορατότητα {(aviation.visibilityM / 1000).toFixed(1)} km · άνεμος {aviation.windSpeedKmh ?? "—"} km/h · {aviation.flightCategory ?? "—"}</small>}
               {aviation?.rawMetar && <code>{aviation.rawMetar}</code>}
             </article>
             <article>
-              <div><span>METEOALARM · ΕΛΛΑΔΑ</span><StatusDot status={data?.weatherAlerts.status ?? "stale"} /></div>
-              <strong>{data?.weatherAlerts.alerts.length ? `${data.weatherAlerts.alerts.length} ενεργές προειδοποιήσεις` : "Καμία ενεργή προειδοποίηση"}</strong>
-              <p>{data?.weatherAlerts.message ?? "Αναμονή για επίσημη ροή…"}</p>
-              <div className="alert-chips">{data?.weatherAlerts.alerts.slice(0, 3).map((alert) => <a key={alert.id} href={alert.link} target="_blank" rel="noreferrer"><b>{alert.severity}</b>{alert.event.replace(/ warning/i, "")} · {alert.area}</a>)}</div>
+              <div><span>METEOALARM · ΕΛΛΑΔΑ</span><StatusDot status={alerts?.status ?? "stale"} /></div>
+              <strong>{alertTotal ? `${alertTotal} προειδοποιήσεις · ${alerts?.nearbyCount ?? 0} κοντά σου` : "Καμία ενεργή προειδοποίηση"}</strong>
+              <p>{alerts?.message ?? "Αναμονή για επίσημη ροή…"}</p>
+              <div className="alert-chips">{alerts?.alerts.slice(0, 4).map((alert) => <a key={alert.id} href={alert.link} target="_blank" rel="noreferrer"><b>{alert.severity}</b>{alert.event.replace(/ warning/i, "")} · {alert.area}</a>)}</div>
             </article>
           </div>
         </section>
@@ -472,14 +635,14 @@ function DashboardView({ data, selected, loading, error, observer, language, eum
   );
 }
 
-function MapView({ data, selected, observer, radar, radarVisible, lightningVisible, infraredVisible, cloudTopVisible, instabilityVisible, ringsVisible, eumetsat, onRadar, onLightning, onInfrared, onCloudTop, onInstability, onRings, onSelect, onPoint }: {
-  data: OpportunityResponse | null; selected: StormCandidate | null; observer: SavedLocation; radar: RadarMetadata | null; radarVisible: boolean; lightningVisible: boolean; infraredVisible: boolean; cloudTopVisible: boolean; instabilityVisible: boolean; ringsVisible: boolean; eumetsat: EumetsatMetadata | null; onRadar: (value: boolean) => void; onLightning: (value: boolean) => void; onInfrared: (value: boolean) => void; onCloudTop: (value: boolean) => void; onInstability: (value: boolean) => void; onRings: (value: boolean) => void; onSelect: (id: string) => void; onPoint: () => void;
+function MapView({ candidates, selected, observer, radar, radarVisible, lightningVisible, infraredVisible, cloudTopVisible, instabilityVisible, ringsVisible, eumetsat, onRadar, onLightning, onInfrared, onCloudTop, onInstability, onRings, onSelect, onPoint }: {
+  candidates: StormCandidate[]; selected: StormCandidate | null; observer: SavedLocation; radar: RadarMetadata | null; radarVisible: boolean; lightningVisible: boolean; infraredVisible: boolean; cloudTopVisible: boolean; instabilityVisible: boolean; ringsVisible: boolean; eumetsat: EumetsatMetadata | null; onRadar: (value: boolean) => void; onLightning: (value: boolean) => void; onInfrared: (value: boolean) => void; onCloudTop: (value: boolean) => void; onInstability: (value: boolean) => void; onRings: (value: boolean) => void; onSelect: (id: string) => void; onPoint: () => void;
 }) {
   return (
     <div className="map-layout">
       <section className="map-panel">
         <div className="map-toolbar"><div><span className="eyebrow">MEDITERRANEAN WATCH</span><h1>Ζωντανός χάρτης & πρόγνωση</h1></div><div className="layer-toggles"><label><input type="checkbox" checked={lightningVisible} onChange={(event) => onLightning(event.target.checked)} /> Κεραυνοί MTG</label><label><input type="checkbox" checked={infraredVisible} onChange={(event) => onInfrared(event.target.checked)} /> IR νέφη</label><label><input type="checkbox" checked={cloudTopVisible} onChange={(event) => onCloudTop(event.target.checked)} /> Ύψος κορυφών</label><label><input type="checkbox" checked={instabilityVisible} onChange={(event) => onInstability(event.target.checked)} /> K-index</label><label><input type="checkbox" checked={radarVisible} onChange={(event) => onRadar(event.target.checked)} /> Radar</label><label><input type="checkbox" checked={ringsVisible} onChange={(event) => onRings(event.target.checked)} /> Δακτύλιοι</label></div></div>
-        <div className="map-wrap"><StormMap observer={observer} candidates={data?.candidates ?? []} selectedId={selected?.id ?? null} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onSelect={onSelect} /><div className="map-legend"><span><i className="legend-observer" /> Παρατηρητής</span><span><i className="legend-target" /> Πρόγνωση</span><span><i className="legend-lightning" /> MTG-LI οπτικές εκπομπές</span><span><i className="legend-uncertainty" /> Αβεβαιότητα στόχου</span></div></div>
+        <div className="map-wrap"><StormMap observer={observer} candidates={candidates} selectedId={selected?.id ?? null} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onSelect={onSelect} /><div className="map-legend"><span><i className="legend-observer" /> Παρατηρητής</span><span><i className="legend-target" /> Πρόγνωση</span><span><i className="legend-lightning" /> MTG-LI οπτικές εκπομπές</span><span><i className="legend-uncertainty" /> Αβεβαιότητα στόχου</span></div></div>
         <p className="attribution">© OpenStreetMap contributors · Lightning/IR/CTH/K-index: EUMETSAT μέσω EUMETView WMS · Radar: RainViewer · Πρόγνωση: Open-Meteo. Τα δορυφορικά layers είναι οπτικές απεικονίσεις, όχι αριθμητικές μετρήσεις μέσα στη βαθμολογία.</p>
         <div className="lightning-shortcuts"><span>Εξωτερική διασταύρωση:</span><a href="https://www.lightningmaps.org/?lang=el" target="_blank" rel="noreferrer">LightningMaps Europe <ExternalLink size={13} /></a><a href="https://www.windy.com/-Weather-radar-radar" target="_blank" rel="noreferrer">Windy Radar + Lightning <ExternalLink size={13} /></a></div>
       </section>
@@ -490,23 +653,36 @@ function MapView({ data, selected, observer, radar, radarVisible, lightningVisib
   );
 }
 
-function ForecastView({ data, selected, onSelect, onPoint }: { data: OpportunityResponse | null; selected: StormCandidate | null; onSelect: (id: string) => void; onPoint: () => void }) {
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">NEXT 72 HOURS</span><h1>Προγνωστικές ευκαιρίες</h1><p>Χονδροειδής σάρωση όλων των διευθύνσεων. Οι θέσεις μπορούν να μετακινηθούν σημαντικά.</p></div><CalendarClock size={30} /></div><section className="panel"><div className="forecast-table"><div className="forecast-head"><span>Έγκυρη ώρα</span><span>Κατεύθυνση</span><span>Απόσταση</span><span>CAPE / Υετός</span><span>Δείκτης</span><span /></div>{data?.candidates.length ? data.candidates.map((candidate) => <button key={candidate.id} className={selected?.id === candidate.id ? "selected" : ""} onClick={() => onSelect(candidate.id)}><span>{formatAthens(candidate.forecastValidAt)}</span><span>{directionLabel(candidate.bearingDeg, "el")} · {candidate.bearingDeg.toFixed(0)}°</span><span>{candidate.distanceKm.toFixed(0)} km</span><span>{candidate.capeJkg?.toFixed(0) ?? "—"} J/kg · {candidate.precipitationMm?.toFixed(1) ?? "—"} mm</span><strong>{candidate.score.total}/100</strong><ChevronRight size={17} /></button>) : <EmptyState title="Καμία υποψήφια κυψέλη" description="Δεν βρέθηκε συνδυασμός αστάθειας και υετού που να περνά τα αρχικά φίλτρα." />}</div></section>{selected && <section className="panel explanation-panel"><div><span className="eyebrow">WHY THIS SCORE</span><h2>Επεξήγηση δείκτη {selected.score.total}/100</h2></div><div className="score-breakdown">{[["Δραστηριότητα", selected.score.activity, 35], ["Ατμόσφαιρα", selected.score.atmosphere, 30], ["Έδαφος", selected.score.terrain, 20], ["Απόσταση", selected.score.distance, 10], ["Σκοτάδι", selected.score.darkness, 5]].map(([label, value, max]) => <div key={String(label)}><span>{label}</span><div><i style={{ width: `${Number(value) / Number(max) * 100}%` }} /></div><strong>{value}/{max}</strong></div>)}</div><ul className="reason-list">{[...selected.score.reasons, ...selected.score.limitations].map((reason) => <li key={reason}>{reason}</li>)}</ul><button className="primary-action" onClick={onPoint}>Άνοιγμα στόχευσης</button></section>}</div>;
+function ForecastView({ candidates, selected, onSelect, onPoint }: { candidates: StormCandidate[]; selected: StormCandidate | null; onSelect: (id: string) => void; onPoint: () => void }) {
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">NEXT 48 HOURS</span><h1>Προγνωστικές ευκαιρίες</h1><p>Χονδροειδής σάρωση όλων των διευθύνσεων. Οι θέσεις μπορούν να μετακινηθούν σημαντικά.</p></div><CalendarClock size={30} /></div><section className="panel"><div className="forecast-table"><div className="forecast-head"><span>Έγκυρη ώρα</span><span>Κατεύθυνση</span><span>Απόσταση</span><span>CAPE / Υετός</span><span>Δείκτης</span><span /></div>{candidates.length ? candidates.map((candidate) => <button key={candidate.id} className={selected?.id === candidate.id ? "selected" : ""} onClick={() => onSelect(candidate.id)}><span>{formatAthens(candidate.forecastValidAt)}</span><span>{directionLabel(candidate.bearingDeg, "el")} · {candidate.bearingDeg.toFixed(0)}°</span><span>{candidate.distanceKm.toFixed(0)} km</span><span>{candidate.capeJkg?.toFixed(0) ?? "—"} J/kg · {candidate.precipitationMm?.toFixed(1) ?? "—"} mm</span><strong>{candidate.score.total}/100</strong><ChevronRight size={17} /></button>) : <EmptyState title="Καμία υποψήφια κυψέλη" description="Δεν βρέθηκε συνδυασμός αστάθειας και υετού που να περνά τα αρχικά φίλτρα." />}</div></section>{selected && <section className="panel explanation-panel"><div><span className="eyebrow">WHY THIS SCORE</span><h2>Επεξήγηση δείκτη {selected.score.total}/100</h2></div><div className="score-breakdown">{[["Δραστηριότητα", selected.score.activity, 35], ["Ατμόσφαιρα", selected.score.atmosphere, 30], ["Έδαφος", selected.score.terrain, 20], ["Απόσταση", selected.score.distance, 10], ["Σκοτάδι", selected.score.darkness, 5]].map(([label, value, max]) => <div key={String(label)}><span>{label}</span><div><i style={{ width: `${Number(value) / Number(max) * 100}%` }} /></div><strong>{value}/{max}</strong></div>)}</div><ul className="reason-list">{[...selected.score.reasons, ...selected.score.limitations].map((reason) => <li key={reason}>{reason}</li>)}</ul><button className="primary-action" onClick={onPoint}>Άνοιγμα στόχευσης</button></section>}</div>;
 }
 
 function signedAngle(target: number, current: number) {
   return ((target - current + 540) % 360) - 180;
 }
 
+const SETTING_LABELS: Record<string, string> = {
+  aperture: "Διάφραγμα",
+  iso: "ISO",
+  shutter: "Έκθεση",
+  whiteBalance: "Ισορροπία λευκού",
+  format: "Μορφή αρχείου",
+  interval: "Διάστημα λήψεων",
+};
+
+type CompassEvent = DeviceOrientationEvent & { webkitCompassHeading?: number };
+
 function PointView({ candidate, observer, lens, fov, framing, terrain, terrainLoading, sky, language }: {
   candidate: StormCandidate | null; observer: SavedLocation; lens: LensProfile; fov: { horizontalDeg: number; verticalDeg: number }; framing: ReturnType<typeof framingAssessment> | null; terrain: TerrainProfile | null; terrainLoading: boolean; sky: ReturnType<typeof skyState> | null; language: Language;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const orientationHandlerRef = useRef<EventListener | null>(null);
+  const orientationRef = useRef<{ eventName: string; handler: EventListener } | null>(null);
+  const relativeWarningRef = useRef(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraMessage, setCameraMessage] = useState("Η εικόνα μένει στη συσκευή και δεν μεταφορτώνεται.");
   const [heading, setHeading] = useState<number | null>(null);
+  const [sensorsActive, setSensorsActive] = useState(false);
   const [applyDeclination, setApplyDeclination] = useState(true);
   const [manualHeading, setManualHeading] = useState(candidate?.bearingDeg ?? 0);
   const [elevation, setElevation] = useState(candidate ? (candidate.pointing[0].elevationDeg + candidate.pointing.at(-1)!.elevationDeg) / 2 : 10);
@@ -521,10 +697,7 @@ function PointView({ candidate, observer, lens, fov, framing, terrain, terrainLo
 
   useEffect(() => () => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
-    if (orientationHandlerRef.current) {
-      window.removeEventListener("deviceorientationabsolute", orientationHandlerRef.current);
-      window.removeEventListener("deviceorientation", orientationHandlerRef.current);
-    }
+    if (orientationRef.current) window.removeEventListener(orientationRef.current.eventName, orientationRef.current.handler);
   }, []);
   useEffect(() => {
     if (!candidate) return;
@@ -553,24 +726,32 @@ function PointView({ candidate, observer, lens, fov, framing, terrain, terrainLo
   const enableCompass = async () => {
     type PermissionDeviceOrientationEvent = typeof DeviceOrientationEvent & { requestPermission?: () => Promise<"granted" | "denied"> };
     try {
+      if (typeof DeviceOrientationEvent === "undefined") throw new Error("Οι αισθητήρες προσανατολισμού δεν υποστηρίζονται.");
       const OrientationEvent = DeviceOrientationEvent as PermissionDeviceOrientationEvent;
       if (OrientationEvent.requestPermission) {
         const permission = await OrientationEvent.requestPermission();
         if (permission !== "granted") throw new Error("Δεν δόθηκε άδεια αισθητήρων.");
       }
-      if (orientationHandlerRef.current) {
-        window.removeEventListener("deviceorientationabsolute", orientationHandlerRef.current);
-        window.removeEventListener("deviceorientation", orientationHandlerRef.current);
-      }
-      const handler = ((event: DeviceOrientationEvent) => {
-        const iosHeading = (event as DeviceOrientationEvent & { webkitCompassHeading?: number }).webkitCompassHeading;
-        const nextHeading = iosHeading ?? (event.alpha == null ? null : (360 - event.alpha) % 360);
+      if (orientationRef.current) window.removeEventListener(orientationRef.current.eventName, orientationRef.current.handler);
+      // Listen to one stream only: on Android the plain event has a relative (arbitrary) alpha,
+      // and mixing it with the absolute event made the heading jump between two references.
+      const supportsAbsolute = "ondeviceorientationabsolute" in window;
+      const eventName = supportsAbsolute ? "deviceorientationabsolute" : "deviceorientation";
+      const handler = ((event: CompassEvent) => {
+        if (event.beta == null || event.gamma == null) return;
+        const pointing = cameraPointing(event.alpha ?? 0, event.beta, event.gamma);
+        const absolute = supportsAbsolute || event.absolute;
+        const nextHeading = typeof event.webkitCompassHeading === "number" ? event.webkitCompassHeading : absolute && event.alpha != null ? pointing.headingDeg : null;
         if (nextHeading != null) setHeading(nextHeading);
-        if (event.beta != null) setElevation(Math.max(-10, Math.min(90, 90 - Math.abs(event.beta))));
+        else if (!relativeWarningRef.current) {
+          relativeWarningRef.current = true;
+          setSensorMessage("Η συσκευή δίνει μόνο σχετικό προσανατολισμό· η ανύψωση είναι ζωντανή, αλλά όρισε το αζιμούθιο χειροκίνητα.");
+        }
+        setElevation(Math.max(-10, Math.min(90, pointing.elevationDeg)));
+        setSensorsActive(true);
       }) as EventListener;
-      orientationHandlerRef.current = handler;
-      window.addEventListener("deviceorientationabsolute", handler);
-      window.addEventListener("deviceorientation", handler);
+      orientationRef.current = { eventName, handler };
+      window.addEventListener(eventName, handler);
       setSensorMessage("Αισθητήρες ενεργοί. Κάνε κίνηση ∞ για βαθμονόμηση και κράτησε το κινητό μακριά από μέταλλα ή μαγνήτες.");
     } catch (error) { setSensorMessage(error instanceof Error ? error.message : "Οι αισθητήρες δεν υποστηρίζονται."); }
   };
@@ -588,32 +769,36 @@ function PointView({ candidate, observer, lens, fov, framing, terrain, terrainLo
   const effectiveHeading = heading == null ? manualHeading : normalizeBearing(heading + (applyDeclination ? declination : 0));
   const horizontalError = signedAngle(candidate.bearingDeg, effectiveHeading);
   const verticalError = targetElevation - elevation;
-  const aligned = angularDifference(effectiveHeading, candidate.bearingDeg) < 3 && Math.abs(verticalError) < 3;
+  // "Centred" only means something when the reading comes from the device sensors.
+  const aligned = sensorsActive && angularDifference(effectiveHeading, candidate.bearingDeg) < 3 && Math.abs(verticalError) < 3;
   const markerLeft = Math.max(7, Math.min(93, 50 + horizontalError / 60 * 100));
   // Keep the moving reticle inside the clear middle band, away from the top instruction and bottom readout.
   const markerTop = Math.max(28, Math.min(70, 50 - verticalError / 45 * 100));
-  const instruction = aligned ? "Στόχος κεντραρισμένος" : `${horizontalError > 3 ? "στρέψε δεξιά" : horizontalError < -3 ? "στρέψε αριστερά" : "σωστό αζιμούθιο"} · ${verticalError > 3 ? "σήκωσε" : verticalError < -3 ? "χαμήλωσε" : "σωστή ανύψωση"}`;
+  const directions = `${horizontalError > 3 ? "στρέψε δεξιά" : horizontalError < -3 ? "στρέψε αριστερά" : "σωστό αζιμούθιο"} · ${verticalError > 3 ? "σήκωσε" : verticalError < -3 ? "χαμήλωσε" : "σωστή ανύψωση"}`;
+  const instruction = !sensorsActive ? "Χειροκίνητη προεπισκόπηση · ενεργοποίησε τους αισθητήρες για ζωντανή καθοδήγηση" : aligned ? "Στόχος κεντραρισμένος" : directions;
+  const bandWidthPercent = Math.max(6, Math.min(100, (targetHalfWidth * 2) / fov.horizontalDeg * 100));
+  const recommendation = photoRecommendation(lens, sky?.moonInterference ?? false, targetHalfWidth * 2);
 
   return <div className="point-layout">
     <section className="point-hero">
       <span className="eyebrow">LIVE CAMERA GUIDANCE · WMM2025 TRUE NORTH</span>
       <h1>Στρέψε την κάμερα προς <em>{directionLabel(candidate.bearingDeg, language)}</em></h1>
-      <div className="bearing-number"><strong>{candidate.bearingDeg.toFixed(1)}°</strong><span>αληθές αζιμούθιο · στόχος {targetElevation.toFixed(1)}° ψηλά</span></div>
+      <div className="bearing-number"><strong>{candidate.bearingDeg.toFixed(1)}°</strong><span>αληθές αζιμούθιο · στόχος {targetElevation.toFixed(1)}° ψηλά · {formatAthens(candidate.forecastValidAt, language)}</span></div>
       <div className={`camera-guidance ${cameraActive ? "active" : ""}`}>
         <video ref={videoRef} muted playsInline aria-label="Ζωντανή εικόνα πίσω κάμερας" />
         <div className="camera-horizon" />
         <div className={`camera-target ${aligned ? "aligned" : ""}`} style={{ left: `${markerLeft}%`, top: `${markerTop}%` }}><Crosshair size={34} /><span>TLE</span></div>
         <div className={`guidance-instruction ${aligned ? "aligned" : ""}`} role="status" aria-live="polite">{instruction}</div>
-        <div className="camera-readout">Τώρα {effectiveHeading.toFixed(0)}° αληθές / {elevation.toFixed(0)}° · στόχος {candidate.bearingDeg.toFixed(0)}° / {targetElevation.toFixed(0)}°</div>
+        <div className="camera-readout">{sensorsActive ? "Τώρα" : "Χειροκίνητα"} {effectiveHeading.toFixed(0)}° αληθές / {elevation.toFixed(0)}° · στόχος {candidate.bearingDeg.toFixed(0)}° / {targetElevation.toFixed(0)}°</div>
       </div>
       {!cameraActive && <div className="camera-start-note"><Camera size={22} /><div><strong>Η κάμερα είναι κλειστή</strong><span>Πάτησε «Άνοιγμα κάμερας» για ζωντανή εικόνα. Ο δείκτης στόχευσης λειτουργεί και χειροκίνητα.</span></div></div>}
-      <div className="guidance-actions"><button className="primary-action" onClick={toggleCamera}><Camera size={18} />{cameraActive ? "Κλείσιμο κάμερας" : "Άνοιγμα κάμερας"}</button><button className="secondary-action" onClick={enableCompass}><Compass size={18} />Αισθητήρες</button></div>
+      <div className="guidance-actions"><button className="primary-action" onClick={toggleCamera}><Camera size={18} />{cameraActive ? "Κλείσιμο κάμερας" : "Άνοιγμα κάμερας"}</button><button className="secondary-action" onClick={enableCompass}><Compass size={18} />{sensorsActive ? "Αισθητήρες ενεργοί" : "Αισθητήρες"}</button></div>
       <p className="sensor-note">{cameraMessage} {sensorMessage}</p>
       <label className="wmm-toggle"><input type="checkbox" checked={applyDeclination} onChange={(event) => setApplyDeclination(event.target.checked)} disabled={heading == null} /><span><strong>Διόρθωση WMM2025 {declination >= 0 ? "+" : ""}{declination.toFixed(1)}°</strong> από μαγνητικό σε αληθή βορρά. Απενεργοποίησέ την μόνο αν η συσκευή σου δίνει ήδη αληθές αζιμούθιο.</span></label>
-      <div className="manual-guidance"><label>Αζιμούθιο συσκευής <strong>{effectiveHeading.toFixed(0)}°</strong><input type="range" min="0" max="359" value={effectiveHeading} onChange={(event) => { setHeading(null); setManualHeading(Number(event.target.value)); }} /></label><label>Ανύψωση κάμερας <strong>{elevation.toFixed(0)}°</strong><input type="range" min="-5" max="60" value={elevation} onChange={(event) => setElevation(Number(event.target.value))} /></label></div>
+      <div className="manual-guidance"><label>Αζιμούθιο συσκευής <strong>{effectiveHeading.toFixed(0)}°</strong><input type="range" min="0" max="359" value={Math.round(effectiveHeading) % 360} onChange={(event) => { setHeading(null); setManualHeading(Number(event.target.value)); }} /></label><label>Ανύψωση κάμερας <strong>{elevation.toFixed(0)}°</strong><input type="range" min="-10" max="90" value={Math.round(elevation)} onChange={(event) => setElevation(Number(event.target.value))} /></label></div>
       <div className="point-grid"><div><span>Οριζόντιος τομέας</span><strong>{targetMin.toFixed(1)}° → {targetMax.toFixed(1)}°</strong></div><div><span>Χρήσιμη ανύψωση</span><strong>{minElevation.toFixed(1)}° → {maxElevation.toFixed(1)}°</strong></div><div><span>Ορίζοντας εδάφους</span><strong>{terrainLoading ? "υπολογισμός…" : terrain?.horizonAngleDeg != null ? `${terrain.horizonAngleDeg.toFixed(1)}°` : "μη επαληθευμένος"}</strong></div><div><span>Ορατό εύρος TLE</span><strong>{visibility.status === "clear" ? "50–90 km" : visibility.status === "partial" ? `${visibility.visibleAltitudesKm[0]}–${visibility.visibleAltitudesKm.at(-1)} km` : visibility.status === "blocked" ? "Αποκλεισμένο" : "Άγνωστο"}</strong></div></div>
     </section>
-    <aside className="point-sidebar"><section className="panel compact"><span className="eyebrow">FRAME CHECK</span><h2>{lens.name}</h2><div className="fov-visual"><div className="fov-frame"><div className="target-band" style={{ height: `${Math.min(80, ((maxElevation - minElevation) / fov.verticalDeg) * 100)}%` }} /></div></div><div className="fov-values"><span>Οριζόντια <strong>{fov.horizontalDeg.toFixed(1)}°</strong></span><span>Κάθετα <strong>{fov.verticalDeg.toFixed(1)}°</strong></span></div><p className={framing?.fits ? "fit-ok" : "fit-warn"}>{framing?.fits ? "Η εκτιμώμενη περιοχή χωρά με περιθώριο στο κάδρο." : "Η αβεβαιότητα δεν χωρά άνετα. Προτίμησε ευρύτερο φακό."}</p></section><section className="panel compact"><span className="eyebrow">FIELD SETTINGS</span>{Object.entries(photoRecommendation(lens, sky?.moonInterference ?? false, targetHalfWidth * 2)).slice(1, 7).map(([key, value]) => <div className="setting-row" key={key}><span>{key}</span><strong>{value}</strong></div>)}</section><section className="safety-card"><ShieldAlert size={20} /><div><strong>Προτεραιότητα η ασφάλεια</strong><p>Μην παρατηρείς σε εκτεθειμένο σημείο όταν η καταιγίδα πλησιάζει. Ο στόχος εδώ είναι προγνωστικός, όχι επιβεβαιωμένος.</p></div></section></aside>
+    <aside className="point-sidebar"><section className="panel compact"><span className="eyebrow">FRAME CHECK</span><h2>{lens.name}</h2><div className="fov-visual"><div className="fov-frame"><div className="target-band" style={{ width: `${bandWidthPercent}%`, height: `${Math.min(80, Math.max(4, ((maxElevation - minElevation) / fov.verticalDeg) * 100))}%` }} /></div></div><div className="fov-values"><span>Οριζόντια <strong>{fov.horizontalDeg.toFixed(1)}°</strong></span><span>Κάθετα <strong>{fov.verticalDeg.toFixed(1)}°</strong></span></div><p className={framing?.fits ? "fit-ok" : "fit-warn"}>{framing?.fits ? "Η εκτιμώμενη περιοχή χωρά με περιθώριο στο κάδρο." : "Η αβεβαιότητα δεν χωρά άνετα. Προτίμησε ευρύτερο φακό."}</p></section><section className="panel compact"><span className="eyebrow">FIELD SETTINGS</span>{Object.entries(recommendation).filter(([key]) => key in SETTING_LABELS).map(([key, value]) => <div className="setting-row" key={key}><span>{SETTING_LABELS[key]}</span><strong>{value}</strong></div>)}</section><section className="safety-card"><ShieldAlert size={20} /><div><strong>Προτεραιότητα η ασφάλεια</strong><p>Μην παρατηρείς σε εκτεθειμένο σημείο όταν η καταιγίδα πλησιάζει. Ο στόχος εδώ είναι προγνωστικός, όχι επιβεβαιωμένος.</p></div></section></aside>
   </div>;
 }
 
@@ -631,7 +816,9 @@ function SkyView({ candidate, terrain, fov, lens, orientation, sky, onOrientatio
   const moonX = 350 + moonOffset / sectorWidth * 560;
   const leftBearing = (candidate.bearingDeg - sectorWidth / 2 + 360) % 360;
   const rightBearing = (candidate.bearingDeg + sectorWidth / 2) % 360;
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">ANGULAR CAMERA VIEW</span><h1>Ορίζοντας & πραγματικό κάδρο</h1><p>Ο οριζόντιος άξονας είναι αζιμούθιο γύρω από τον στόχο και ο κάθετος πραγματική γωνία ανύψωσης.</p></div><div className="segmented"><button className={orientation === "landscape" ? "active" : ""} onClick={() => onOrientation("landscape")}>Οριζόντια</button><button className={orientation === "portrait" ? "active" : ""} onClick={() => onOrientation("portrait")}>Κάθετα</button></div></div><section className="panel sky-panel"><div className="sky-labels"><span>{maxElevation}°</span><span>{maxElevation / 2}°</span><span>0° Ορίζοντας</span></div><svg viewBox="0 0 700 300" role="img" aria-label="Γωνιακό κάδρο, ζώνη TLE και κεντρικός ορίζοντας εδάφους"><defs><linearGradient id="skyGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#0a1530" /><stop offset="1" stopColor="#18283b" /></linearGradient><linearGradient id="terrainGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#263b45" /><stop offset="1" stopColor="#101a20" /></linearGradient></defs><rect width="700" height="300" fill="url(#skyGradient)" />{[0, .25, .5, .75, 1].map((ratio) => <line key={ratio} x1="0" x2="700" y1={260 - ratio * 225} y2={260 - ratio * 225} stroke="#7390aa" strokeOpacity=".16" />)}<rect x="70" y={y(Math.min(maxElevation, fov.verticalDeg))} width="560" height={260 - y(Math.min(maxElevation, fov.verticalDeg))} rx="8" fill="none" stroke="#7de4ca" strokeWidth="2" strokeDasharray="7 5" /><line x1="350" x2="350" y1="30" y2="260" stroke="#7de4ca" strokeOpacity=".45" /><rect x={350 - targetWidth / 2} y={y(high)} width={targetWidth} height={Math.max(7, y(low) - y(high))} rx="5" fill="#f04362" fillOpacity=".34" stroke="#ff6d84" /><text x="350" y={Math.max(22, y(high) - 9)} textAnchor="middle" fill="#ffb1be" fontSize="12">TLE 50–90 km</text>{sky && sky.moonAltitudeDeg > 0 && moonX >= 20 && moonX <= 680 && <g transform={`translate(${moonX},${y(sky.moonAltitudeDeg)})`}><circle r="9" fill="#f4dfad" /><text x="14" y="4" fill="#dce8f3" fontSize="11">Σελήνη</text></g>}<rect x="0" y={y(horizon)} width="700" height={300 - y(horizon)} fill="url(#terrainGradient)" /><line x1="0" x2="700" y1={y(horizon)} y2={y(horizon)} stroke="#91a49c" strokeWidth="2" /><text x="12" y={Math.max(16, y(horizon) - 7)} fill="#b9c8c3" fontSize="10">DEM κεντρικής διεύθυνσης: {terrain?.horizonAngleDeg == null ? "μη διαθέσιμο" : `${terrain.horizonAngleDeg.toFixed(1)}°`}</text></svg><div className="horizon-caption"><span>{directionLabel(leftBearing, "el")} {leftBearing.toFixed(0)}°</span><strong>Στόχος {candidate.bearingDeg.toFixed(1)}°</strong><span>{directionLabel(rightBearing, "el")} {rightBearing.toFixed(0)}°</span></div><div className="sky-key"><span><i className="key-tle" />Θεωρητική ζώνη TLE</span><span><i className="key-fov" />Κάδρο {lens.focalLengthMm} mm</span><span><i className="key-terrain" />Όριο DEM στην κεντρική διεύθυνση</span></div></section><div className="warning-box"><Mountain size={18} /><p><strong>Περιορισμός:</strong> το DEM ελέγχει τη γραμμή προς το κέντρο του στόχου και δεν παριστάνεται πλέον ως ψεύτικο πανοραμικό ανάγλυφο 360°.</p></div></div>;
+  // Elevation labels are drawn inside the SVG so they stay on their grid lines at every width.
+  const gridAngles = [0, maxElevation / 2, maxElevation];
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">ANGULAR CAMERA VIEW</span><h1>Ορίζοντας & πραγματικό κάδρο</h1><p>Ο οριζόντιος άξονας είναι αζιμούθιο γύρω από τον στόχο και ο κάθετος πραγματική γωνία ανύψωσης.</p></div><div className="segmented"><button className={orientation === "landscape" ? "active" : ""} onClick={() => onOrientation("landscape")}>Οριζόντια</button><button className={orientation === "portrait" ? "active" : ""} onClick={() => onOrientation("portrait")}>Κάθετα</button></div></div><section className="panel sky-panel"><svg viewBox="0 0 700 300" role="img" aria-label="Γωνιακό κάδρο, ζώνη TLE και κεντρικός ορίζοντας εδάφους"><defs><linearGradient id="skyGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#0a1530" /><stop offset="1" stopColor="#18283b" /></linearGradient><linearGradient id="terrainGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#263b45" /><stop offset="1" stopColor="#101a20" /></linearGradient></defs><rect width="700" height="300" fill="url(#skyGradient)" />{[0, .25, .5, .75, 1].map((ratio) => <line key={ratio} x1="0" x2="700" y1={260 - ratio * 225} y2={260 - ratio * 225} stroke="#7390aa" strokeOpacity=".16" />)}<rect x="70" y={y(Math.min(maxElevation, fov.verticalDeg))} width="560" height={260 - y(Math.min(maxElevation, fov.verticalDeg))} rx="8" fill="none" stroke="#7de4ca" strokeWidth="2" strokeDasharray="7 5" /><line x1="350" x2="350" y1="30" y2="260" stroke="#7de4ca" strokeOpacity=".45" /><rect x={350 - targetWidth / 2} y={y(high)} width={targetWidth} height={Math.max(7, y(low) - y(high))} rx="5" fill="#f04362" fillOpacity=".34" stroke="#ff6d84" /><text x="350" y={Math.max(22, y(high) - 9)} textAnchor="middle" fill="#ffb1be" fontSize="12">TLE 50–90 km</text>{sky && sky.moonAltitudeDeg > 0 && moonX >= 20 && moonX <= 680 && <g transform={`translate(${moonX},${y(sky.moonAltitudeDeg)})`}><circle r="9" fill="#f4dfad" /><text x="14" y="4" fill="#dce8f3" fontSize="11">Σελήνη</text></g>}<rect x="0" y={y(horizon)} width="700" height={300 - y(horizon)} fill="url(#terrainGradient)" /><line x1="0" x2="700" y1={y(horizon)} y2={y(horizon)} stroke="#91a49c" strokeWidth="2" />{gridAngles.map((angle) => <text key={angle} x="8" y={y(angle) - 4} fill="#d3e1eb" fillOpacity=".7" fontSize="11">{angle === 0 ? "0° ορίζοντας" : `${angle}°`}</text>)}<text x="8" y={Math.min(292, y(horizon) + 20)} fill="#b9c8c3" fontSize="11">DEM κεντρικής διεύθυνσης: {terrain?.horizonAngleDeg == null ? "μη διαθέσιμο" : `${terrain.horizonAngleDeg.toFixed(1)}°`}</text></svg><div className="horizon-caption"><span>{directionLabel(leftBearing, "el")} {leftBearing.toFixed(0)}°</span><strong>Στόχος {candidate.bearingDeg.toFixed(1)}°</strong><span>{directionLabel(rightBearing, "el")} {rightBearing.toFixed(0)}°</span></div><div className="sky-key"><span><i className="key-tle" />Θεωρητική ζώνη TLE</span><span><i className="key-fov" />Κάδρο {lens.focalLengthMm} mm</span><span><i className="key-terrain" />Όριο DEM στην κεντρική διεύθυνση</span></div></section><div className="warning-box"><Mountain size={18} /><p><strong>Περιορισμός:</strong> το DEM ελέγχει τη γραμμή προς το κέντρο του στόχου και δεν παριστάνεται πλέον ως ψεύτικο πανοραμικό ανάγλυφο 360°.</p></div></div>;
 }
 
 function AuroraView({ aurora, loading, lens, observer, forecast }: { aurora: AuroraResponse | null; loading: boolean; lens: LensProfile; observer: SavedLocation; forecast: OpportunityResponse["observerForecast"] }) {
@@ -656,7 +843,7 @@ function LocationsView({ observer, locations, candidate, onObserver, onLocations
     setGpsStatus("Αναμονή άδειας GPS…");
     navigator.geolocation.getCurrentPosition((position) => { onObserver({ ...observer, name: "Τρέχουσα θέση GPS", latitude: position.coords.latitude, longitude: position.coords.longitude, elevationM: position.coords.altitude ?? observer.elevationM }); setGpsStatus(`Ακρίβεια περίπου ±${position.coords.accuracy.toFixed(0)} m.`); }, (gpsError) => setGpsStatus(gpsError.message), { enableHighAccuracy: true, timeout: 12_000 });
   };
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">OBSERVER NETWORK</span><h1>Θέσεις παρατήρησης</h1><p>Οι συντεταγμένες αποθηκεύονται μόνο σε αυτόν τον browser.</p></div><button className="secondary-action" onClick={useGps}><LocateFixed size={18} />Χρήση GPS</button></div>{gpsStatus && <div className="info-strip">{gpsStatus}</div>}<div className="locations-grid"><section className="panel location-editor"><h2>Ακριβής ενεργή θέση</h2><label>Όνομα<input value={observer.name} onChange={(event) => onObserver({ ...observer, name: event.target.value })} /></label><div className="two-fields"><label>Γεωγραφικό πλάτος<input type="number" step="0.000001" value={observer.latitude} onChange={(event) => onObserver({ ...observer, latitude: Number(event.target.value) })} /></label><label>Γεωγραφικό μήκος<input type="number" step="0.000001" value={observer.longitude} onChange={(event) => onObserver({ ...observer, longitude: Number(event.target.value) })} /></label></div><div className="two-fields"><label>Υψόμετρο εδάφους (m)<input type="number" value={observer.elevationM ?? 0} onChange={(event) => onObserver({ ...observer, elevationM: Number(event.target.value) })} /></label><label>Ύψος κάμερας (m)<input type="number" step="0.1" value={observer.cameraHeightM} onChange={(event) => onObserver({ ...observer, cameraHeightM: Number(event.target.value) })} /></label></div><label>Φωτορύπανση / εκτίμηση Bortle<select value={observer.lightPollution} onChange={(event) => onObserver({ ...observer, lightPollution: event.target.value as SavedLocation["lightPollution"] })}><option value="unknown">Άγνωστη</option><option value="low">Χαμηλή · Bortle 1–3</option><option value="medium">Μέτρια · Bortle 4–6</option><option value="high">Υψηλή · Bortle 7–9</option></select></label><p className="data-note">Χειροκίνητη εκτίμηση θέσης· δεν παρουσιάζεται ως live μέτρηση φωτορύπανσης και δεν αλλάζει ακόμη τον επιστημονικό δείκτη.</p><div className="save-row"><input placeholder="Όνομα νέας αποθηκευμένης θέσης" value={name} onChange={(event) => setName(event.target.value)} /><button className="primary-action" onClick={addCurrent}><Plus size={17} />Αποθήκευση</button></div></section><section className="panel"><h2>Σύγκριση για τον ίδιο στόχο</h2><div className="location-list">{locations.map((location) => { const geometry = candidate ? inverseGeodesic(location, candidate.coordinates) : null; return <div key={location.id} className={location.id === observer.id ? "active" : ""}><button className="location-select" onClick={() => onObserver(location)}><MapPin size={18} /><span><strong>{location.name}</strong><small>{location.latitude.toFixed(4)}°, {location.longitude.toFixed(4)}° · φωτορύπανση {lightPollutionLabel(location.lightPollution)}{geometry ? ` · ${(geometry.distanceM / 1000).toFixed(0)} km · ${geometry.initialBearingDeg.toFixed(0)}°` : ""}</small></span></button>{location.id !== "sparta-home" && <button className="delete-icon" aria-label="Διαγραφή θέσης" onClick={() => onLocations(locations.filter((item) => item.id !== location.id))}><Trash2 size={16} /></button>}</div>; })}</div><p className="data-note">Η σύγκριση απόστασης/αζιμουθίου είναι διαθέσιμη άμεσα. Η σύγκριση νεφών και DEM απαιτεί ξεχωριστό έλεγχο ανά θέση.</p></section></div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">OBSERVER NETWORK</span><h1>Θέσεις παρατήρησης</h1><p>Οι συντεταγμένες αποθηκεύονται μόνο σε αυτόν τον browser.</p></div><button className="secondary-action" onClick={useGps}><LocateFixed size={18} />Χρήση GPS</button></div>{gpsStatus && <div className="info-strip">{gpsStatus}</div>}<div className="locations-grid"><section className="panel location-editor"><h2>Ακριβής ενεργή θέση</h2><label>Όνομα<input value={observer.name} onChange={(event) => onObserver({ ...observer, name: event.target.value })} /></label><div className="two-fields"><label>Γεωγραφικό πλάτος<NumberField min={-90} max={90} value={observer.latitude} onCommit={(latitude) => onObserver({ ...observer, latitude })} /></label><label>Γεωγραφικό μήκος<NumberField min={-180} max={180} value={observer.longitude} onCommit={(longitude) => onObserver({ ...observer, longitude })} /></label></div><div className="two-fields"><label>Υψόμετρο εδάφους (m)<NumberField min={-500} max={9000} value={observer.elevationM ?? 0} onCommit={(elevationM) => onObserver({ ...observer, elevationM })} /></label><label>Ύψος κάμερας (m)<NumberField min={0} max={100} value={observer.cameraHeightM} onCommit={(cameraHeightM) => onObserver({ ...observer, cameraHeightM })} /></label></div><label>Φωτορύπανση / εκτίμηση Bortle<select value={observer.lightPollution} onChange={(event) => onObserver({ ...observer, lightPollution: event.target.value as SavedLocation["lightPollution"] })}><option value="unknown">Άγνωστη</option><option value="low">Χαμηλή · Bortle 1–3</option><option value="medium">Μέτρια · Bortle 4–6</option><option value="high">Υψηλή · Bortle 7–9</option></select></label><p className="data-note">Χειροκίνητη εκτίμηση θέσης· δεν παρουσιάζεται ως live μέτρηση φωτορύπανσης και δεν αλλάζει ακόμη τον επιστημονικό δείκτη.</p><div className="save-row"><input placeholder="Όνομα νέας αποθηκευμένης θέσης" value={name} onChange={(event) => setName(event.target.value)} /><button className="primary-action" onClick={addCurrent}><Plus size={17} />Αποθήκευση</button></div></section><section className="panel"><h2>Σύγκριση για τον ίδιο στόχο</h2><div className="location-list">{locations.map((location) => { const geometry = candidate ? inverseGeodesic(location, candidate.coordinates) : null; return <div key={location.id} className={location.id === observer.id ? "active" : ""}><button className="location-select" onClick={() => onObserver(location)}><MapPin size={18} /><span><strong>{location.name}</strong><small>{location.latitude.toFixed(4)}°, {location.longitude.toFixed(4)}° · φωτορύπανση {lightPollutionLabel(location.lightPollution)}{geometry ? ` · ${(geometry.distanceM / 1000).toFixed(0)} km · ${geometry.initialBearingDeg.toFixed(0)}°` : ""}</small></span></button>{location.id !== "sparta-home" && <button className="delete-icon" aria-label="Διαγραφή θέσης" onClick={() => onLocations(locations.filter((item) => item.id !== location.id))}><Trash2 size={16} /></button>}</div>; })}</div><p className="data-note">Η σύγκριση απόστασης/αζιμουθίου είναι διαθέσιμη άμεσα. Η σύγκριση νεφών και DEM απαιτεί ξεχωριστό έλεγχο ανά θέση.</p></section></div></div>;
 }
 
 function CameraView({ candidate, lenses, selectedLens, fov, framing, orientation, sky, onSelect, onLenses, onOrientation }: { candidate: StormCandidate | null; lenses: LensProfile[]; selectedLens: LensProfile; fov: { horizontalDeg: number; verticalDeg: number }; framing: ReturnType<typeof framingAssessment> | null; orientation: "landscape" | "portrait"; sky: ReturnType<typeof skyState> | null; onSelect: (id: string) => void; onLenses: (value: LensProfile[]) => void; onOrientation: (value: "landscape" | "portrait") => void }) {
@@ -707,7 +894,7 @@ function CameraView({ candidate, lenses, selectedLens, fov, framing, orientation
               );
             })}
           </div>
-          <form className="custom-lens" onSubmit={addLens}><h3>Προσθήκη φακού</h3><input placeholder="Όνομα" value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} /><input type="number" aria-label="Εστιακή απόσταση" value={custom.focal} onChange={(event) => setCustom({ ...custom, focal: Number(event.target.value) })} /><input type="number" step="0.1" aria-label="Μέγιστο διάφραγμα" value={custom.aperture} onChange={(event) => setCustom({ ...custom, aperture: Number(event.target.value) })} /><button><Plus size={16} />Προσθήκη</button></form>
+          <form className="custom-lens" onSubmit={addLens}><h3>Προσθήκη φακού</h3><input placeholder="Όνομα" value={custom.name} onChange={(event) => setCustom({ ...custom, name: event.target.value })} /><NumberField aria-label="Εστιακή απόσταση (mm)" min={1} max={2000} value={custom.focal} onCommit={(focal) => setCustom({ ...custom, focal })} /><NumberField aria-label="Μέγιστο διάφραγμα (f/)" min={0.5} max={64} value={custom.aperture} onCommit={(aperture) => setCustom({ ...custom, aperture })} /><button><Plus size={16} />Προσθήκη</button></form>
         </section>
         <aside className="view-stack">
           <section className="panel fov-card"><span className="eyebrow">CALCULATED FIELD OF VIEW</span><div className="big-fov"><strong>{fov.horizontalDeg.toFixed(1)}° × {fov.verticalDeg.toFixed(1)}°</strong><span>πραγματικό γωνιακό κάδρο στα {selectedLens.focalLengthMm} mm</span></div>{candidate && <div className={framing?.fits ? "fit-ok" : "fit-warn"}>{framing?.fits ? <Check size={17} /> : <AlertTriangle size={17} />}{framing?.fits ? "Ο στόχος και η αβεβαιότητά του χωρούν." : "Ο στόχος μπορεί να βγει από το κάδρο."}</div>}<p className="data-note">Για αρχική αναζήτηση sprites ξεκίνα με τον Tokina στα 11 mm. Ο Jupiter 200 mm είναι κατάλληλος μόνο όταν η περιοχή έχει επιβεβαιωθεί πολύ καλά.</p></section>
@@ -725,14 +912,16 @@ function LogbookView({ logs, candidate, lens, onLogs }: { logs: LogEntry[]; cand
     const content = format === "json" ? JSON.stringify(logs, null, 2) : ["timestamp,target,tleType,lens,iso,aperture,shutter,success,notes", ...logs.map((entry) => [entry.timestamp, entry.target, entry.tleType, entry.lens, entry.iso, entry.aperture, entry.shutter, entry.success, entry.notes].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","))].join("\n");
     const url = URL.createObjectURL(new Blob([content], { type: format === "json" ? "application/json" : "text/csv" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `spritehunter-logbook.${format}`; anchor.click(); URL.revokeObjectURL(url);
   };
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">OBSERVATION ARCHIVE</span><h1>Ημερολόγιο παρατήρησης</h1><p>Οι καταχωρίσεις αποθηκεύονται τοπικά και οι ώρες εσωτερικά σε UTC.</p></div><div className="export-actions"><button onClick={() => download("csv")}><Download size={16} />CSV</button><button onClick={() => download("json")}><Download size={16} />JSON</button></div></div><div className="log-grid"><form className="panel log-form" onSubmit={add}><h2>Νέα καταχώριση</h2><label>Τύπος TLE<select value={form.tleType} onChange={(event) => setForm({ ...form, tleType: event.target.value })}><option>Red Sprite</option><option>Sprite Halo</option><option>ELVES</option><option>Blue Jet</option><option>Gigantic Jet</option></select></label><div className="three-fields"><label>ISO<input type="number" value={form.iso} onChange={(event) => setForm({ ...form, iso: Number(event.target.value) })} /></label><label>Διάφραγμα<input type="number" step="0.1" value={form.aperture} onChange={(event) => setForm({ ...form, aperture: Number(event.target.value) })} /></label><label>Έκθεση<input value={form.shutter} onChange={(event) => setForm({ ...form, shutter: event.target.value })} /></label></div><label>Αποτέλεσμα<select value={form.success} onChange={(event) => setForm({ ...form, success: event.target.value as LogEntry["success"] })}><option value="yes">Επιτυχία</option><option value="no">Όχι</option><option value="uncertain">Αβέβαιο</option></select></label><label>Σημειώσεις<textarea rows={4} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label><button className="primary-action"><Plus size={17} />Καταχώριση</button></form><section className="panel"><h2>Προηγούμενες παρατηρήσεις</h2>{logs.length ? <div className="log-list">{logs.map((entry) => <article key={entry.id}><div><strong>{entry.tleType}</strong><span className={`result-${entry.success}`}>{entry.success === "yes" ? "Επιτυχία" : entry.success === "no" ? "Όχι" : "Αβέβαιο"}</span></div><small>{formatAthens(entry.timestamp)} · {entry.target}</small><p>{entry.lens} · f/{entry.aperture} · ISO {entry.iso} · {entry.shutter}</p>{entry.notes && <blockquote>{entry.notes}</blockquote>}<button aria-label="Διαγραφή" onClick={() => onLogs(logs.filter((item) => item.id !== entry.id))}><Trash2 size={15} /></button></article>)}</div> : <EmptyState title="Το ημερολόγιο είναι κενό" description="Κατέγραψε τις πραγματικές προσπάθειες για μελλοντική αξιολόγηση του δείκτη." />}</section></div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">OBSERVATION ARCHIVE</span><h1>Ημερολόγιο παρατήρησης</h1><p>Οι καταχωρίσεις αποθηκεύονται τοπικά και οι ώρες εσωτερικά σε UTC.</p></div><div className="export-actions"><button onClick={() => download("csv")}><Download size={16} />CSV</button><button onClick={() => download("json")}><Download size={16} />JSON</button></div></div><div className="log-grid"><form className="panel log-form" onSubmit={add}><h2>Νέα καταχώριση</h2><label>Τύπος TLE<select value={form.tleType} onChange={(event) => setForm({ ...form, tleType: event.target.value })}><option>Red Sprite</option><option>Sprite Halo</option><option>ELVES</option><option>Blue Jet</option><option>Gigantic Jet</option></select></label><div className="three-fields"><label>ISO<NumberField min={50} max={409600} value={form.iso} onCommit={(iso) => setForm({ ...form, iso })} /></label><label>Διάφραγμα<NumberField min={0.5} max={64} value={form.aperture} onCommit={(aperture) => setForm({ ...form, aperture })} /></label><label>Έκθεση<input value={form.shutter} onChange={(event) => setForm({ ...form, shutter: event.target.value })} /></label></div><label>Αποτέλεσμα<select value={form.success} onChange={(event) => setForm({ ...form, success: event.target.value as LogEntry["success"] })}><option value="yes">Επιτυχία</option><option value="no">Όχι</option><option value="uncertain">Αβέβαιο</option></select></label><label>Σημειώσεις<textarea rows={4} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label><button className="primary-action"><Plus size={17} />Καταχώριση</button></form><section className="panel"><h2>Προηγούμενες παρατηρήσεις</h2>{logs.length ? <div className="log-list">{logs.map((entry) => <article key={entry.id}><div><strong>{entry.tleType}</strong><span className={`result-${entry.success}`}>{entry.success === "yes" ? "Επιτυχία" : entry.success === "no" ? "Όχι" : "Αβέβαιο"}</span></div><small>{formatAthens(entry.timestamp)} · {entry.target}</small><p>{entry.lens} · f/{entry.aperture} · ISO {entry.iso} · {entry.shutter}</p>{entry.notes && <blockquote>{entry.notes}</blockquote>}<button aria-label="Διαγραφή" onClick={() => onLogs(logs.filter((item) => item.id !== entry.id))}><Trash2 size={15} /></button></article>)}</div> : <EmptyState title="Το ημερολόγιο είναι κενό" description="Κατέγραψε τις πραγματικές προσπάθειες για μελλοντική αξιολόγηση του δείκτη." />}</section></div></div>;
 }
 
-function AlertsView({ candidate }: { candidate: StormCandidate | null }) {
-  const [prefs, setPrefs] = usePersistedState("spritehunter.alerts", { minimumScore: 60, confidence: "medium", cooldown: 90, quietStart: "01:00", quietEnd: "08:00" });
-  const [permission, setPermission] = useState(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
-  const request = async () => { if (typeof Notification === "undefined") return; setPermission(await Notification.requestPermission()); };
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">EVENT-DRIVEN WATCH</span><h1>Ειδοποιήσεις</h1><p>Ειδοποίηση μόνο όταν η ευκαιρία αλλάζει ουσιαστικά — όχι συνεχής θόρυβος.</p></div><Bell size={30} /></div><div className="alerts-grid"><section className="panel alert-settings"><h2>Κανόνες ειδοποίησης</h2><label>Ελάχιστος δείκτης <strong>{prefs.minimumScore}/100</strong><input type="range" min="30" max="85" value={prefs.minimumScore} onChange={(event) => setPrefs({ ...prefs, minimumScore: Number(event.target.value) })} /></label><label>Ελάχιστη εμπιστοσύνη<select value={prefs.confidence} onChange={(event) => setPrefs({ ...prefs, confidence: event.target.value })}><option value="low">Χαμηλή</option><option value="medium">Μέτρια</option><option value="high">Υψηλή</option></select></label><label>Cooldown (λεπτά)<input type="number" value={prefs.cooldown} onChange={(event) => setPrefs({ ...prefs, cooldown: Number(event.target.value) })} /></label><div className="two-fields"><label>Έναρξη ησυχίας<input type="time" value={prefs.quietStart} onChange={(event) => setPrefs({ ...prefs, quietStart: event.target.value })} /></label><label>Λήξη ησυχίας<input type="time" value={prefs.quietEnd} onChange={(event) => setPrefs({ ...prefs, quietEnd: event.target.value })} /></label></div><button className="secondary-action" onClick={request}><Bell size={17} />Άδεια browser notification</button><p className="data-note">Κατάσταση άδειας: {permission}</p></section><section className="panel"><span className="eyebrow">CURRENT EVALUATION</span><h2>{candidate && candidate.score.total >= prefs.minimumScore ? "Περνά το όριο δείκτη" : "Δεν περνά το όριο"}</h2><div className="alert-preview"><Bell size={20} /><div><strong>Παράδειγμα παραγόμενης ειδοποίησης</strong><p>{candidate ? `Προγνωστική κυψέλη ${candidate.distanceKm.toFixed(0)} km προς ${directionLabel(candidate.bearingDeg, "el")}, δείκτης ${candidate.score.total}/100. Δεν έχει επιβεβαιωθεί ηλεκτρική δραστηριότητα.` : "Δεν υπάρχει κατάλληλος στόχος τώρα."}</p></div></div><div className="warning-box"><AlertTriangle size={17} /><p><strong>Ο browser δεν είναι server.</strong> Με κλειστή εφαρμογή δεν εκτελείται αξιόπιστη παρακολούθηση. Η παρούσα έκδοση παρέχει in-app/browser notifications· server push απαιτεί αποθήκευση συνδρομών και προγραμματισμένο worker.</p></div></section></div></div>;
+function AlertsView({ candidate, prefs, lastAlert, permission, onPrefs, onRequestPermission }: {
+  candidate: StormCandidate | null; prefs: AlertPreferences; lastAlert: { at: string; score: number } | null; permission: NotificationPermission | "unsupported"; onPrefs: (value: AlertPreferences) => void; onRequestPermission: () => void;
+}) {
+  const minimumScore = Math.min(prefs.minimumScore, MAX_FORECAST_SCORE);
+  const passes = candidate != null && candidate.score.total >= minimumScore;
+  const permissionLabel = { granted: "επιτρέπεται", denied: "απορρίφθηκε (άλλαξέ το από τις ρυθμίσεις του browser)", default: "δεν έχει ζητηθεί", unsupported: "δεν υποστηρίζεται σε αυτόν τον browser" }[permission];
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">EVENT-DRIVEN WATCH</span><h1>Ειδοποιήσεις</h1><p>Ειδοποίηση μόνο όταν η ευκαιρία αλλάζει ουσιαστικά — όχι συνεχής θόρυβος.</p></div><Bell size={30} /></div><div className="alerts-grid"><section className="panel alert-settings"><h2>Κανόνες ειδοποίησης</h2><label>Ελάχιστος δείκτης <strong>{minimumScore}/100</strong><input type="range" min="30" max={MAX_FORECAST_SCORE} value={minimumScore} onChange={(event) => onPrefs({ ...prefs, minimumScore: Number(event.target.value) })} /></label><p className="data-note">Χωρίς παρατηρημένους κεραυνούς ο δείκτης δεν ξεπερνά το {MAX_FORECAST_SCORE}, οπότε υψηλότερο όριο δεν θα ενεργοποιούνταν ποτέ.</p><label>Ελάχιστη εμπιστοσύνη<select value={prefs.confidence} onChange={(event) => onPrefs({ ...prefs, confidence: event.target.value as AlertPreferences["confidence"] })}><option value="low">Χαμηλή</option><option value="medium">Μέτρια (απαιτεί επαληθευμένο έδαφος)</option><option value="high">Υψηλή (απαιτεί παρατηρημένους κεραυνούς)</option></select></label><label>Cooldown (λεπτά)<NumberField min={0} max={1440} value={prefs.cooldown} onCommit={(cooldown) => onPrefs({ ...prefs, cooldown })} /></label><div className="two-fields"><label>Έναρξη ησυχίας<input type="time" value={prefs.quietStart} onChange={(event) => event.target.value && onPrefs({ ...prefs, quietStart: event.target.value })} /></label><label>Λήξη ησυχίας<input type="time" value={prefs.quietEnd} onChange={(event) => event.target.value && onPrefs({ ...prefs, quietEnd: event.target.value })} /></label></div><button className="secondary-action" onClick={onRequestPermission} disabled={permission === "granted" || permission === "unsupported"}><Bell size={17} />{permission === "granted" ? "Οι ειδοποιήσεις είναι ενεργές" : "Άδεια browser notification"}</button><p className="data-note">Κατάσταση άδειας: {permissionLabel}{lastAlert ? ` · τελευταία ειδοποίηση ${formatAthens(lastAlert.at)} (δείκτης ${lastAlert.score})` : ""}</p></section><section className="panel"><span className="eyebrow">CURRENT EVALUATION</span><h2>{passes ? "Περνά το όριο δείκτη" : "Δεν περνά το όριο"}</h2><div className="alert-preview"><Bell size={20} /><div><strong>Παράδειγμα παραγόμενης ειδοποίησης</strong><p>{candidate ? `Προγνωστική κυψέλη ${candidate.distanceKm.toFixed(0)} km προς ${directionLabel(candidate.bearingDeg, "el")} για ${formatAthens(candidate.forecastValidAt)}, δείκτης ${candidate.score.total}/100 (${confidenceLabel(candidate.score.confidence).toLowerCase()} εμπιστοσύνη). Δεν έχει επιβεβαιωθεί ηλεκτρική δραστηριότητα.` : "Δεν υπάρχει κατάλληλος στόχος τώρα."}</p></div></div><div className="warning-box"><AlertTriangle size={17} /><p><strong>Ο browser δεν είναι server.</strong> Όσο η εφαρμογή είναι ανοιχτή, ελέγχει ξανά κάθε 15 λεπτά και ειδοποιεί σύμφωνα με τους κανόνες, εκτός από τις ώρες ησυχίας. Με κλειστή εφαρμογή δεν γίνεται παρακολούθηση· αυτό απαιτεί server push και προγραμματισμένο worker.</p></div></section></div></div>;
 }
 
 function SettingsView({ observer, range, data, language, eumetsat, radarStatus, onObserver, onRange, onLanguage, onRefresh }: { observer: SavedLocation; range: { min: number; max: number }; data: OpportunityResponse | null; language: Language; eumetsat: EumetsatMetadata | null; radarStatus: DataStatus; onObserver: (value: SavedLocation) => void; onRange: (value: { min: number; max: number }) => void; onLanguage: (value: Language) => void; onRefresh: () => void }) {
@@ -743,7 +932,7 @@ function SettingsView({ observer, range, data, language, eumetsat, radarStatus, 
     <div className="view-stack">
       <div className="view-heading"><div><span className="eyebrow">SCIENTIFIC CONFIGURATION</span><h1>Ρυθμίσεις & πηγές</h1><p>Οι επιστημονικές παραδοχές είναι ορατές και δεν παρουσιάζονται ως βεβαιότητες.</p></div><Settings size={30} /></div>
       <div className="settings-columns">
-        <section className="panel settings-form"><h2>Παρατήρηση</h2><label>Γλώσσα<select value={language} onChange={(event) => onLanguage(event.target.value as Language)}><option value="el">Ελληνικά</option><option value="en">English</option></select></label><div className="two-fields"><label>Ελάχιστη ακτίνα (km)<input type="number" min="100" max="700" value={range.min} onChange={(event) => onRange({ ...range, min: Number(event.target.value) })} /></label><label>Μέγιστη ακτίνα (km)<input type="number" min="200" max="800" value={range.max} onChange={(event) => onRange({ ...range, max: Number(event.target.value) })} /></label></div><label>Σημειώσεις ασφάλειας<textarea rows={3} value={observer.safetyNotes} onChange={(event) => onObserver({ ...observer, safetyNotes: event.target.value })} /></label><button className="primary-action" onClick={onRefresh}><RefreshCw size={17} />Εφαρμογή & νέα σάρωση</button></section>
+        <section className="panel settings-form"><h2>Παρατήρηση</h2><label>Γλώσσα<select value={language} onChange={(event) => onLanguage(event.target.value as Language)}><option value="el">Ελληνικά</option><option value="en">English</option></select></label><div className="two-fields"><label>Ελάχιστη ακτίνα (km)<NumberField min={100} max={800} isValid={(min) => min < range.max} value={range.min} onCommit={(min) => onRange({ ...range, min })} /></label><label>Μέγιστη ακτίνα (km)<NumberField min={100} max={800} isValid={(max) => max > range.min} value={range.max} onCommit={(max) => onRange({ ...range, max })} /></label></div><label>Σημειώσεις ασφάλειας<textarea rows={3} value={observer.safetyNotes} onChange={(event) => onObserver({ ...observer, safetyNotes: event.target.value })} /></label><button className="primary-action" onClick={onRefresh}><RefreshCw size={17} />Εφαρμογή & νέα σάρωση</button></section>
         <section className="panel data-sources-panel">
           <h2>Πηγές δεδομένων</h2>
           <div className="provider-list detailed"><div><StatusDot status={eumetsat?.status ?? "stale"} /><span><strong>EUMETSAT MTG / MSG</strong><small>{eumetsat?.message ?? "Έλεγχος δημόσιου WMS…"}</small></span></div>{providers.map((provider) => <div key={provider.id}><StatusDot status={provider.status} /><span><strong>{provider.label}</strong><small>{provider.message}</small></span></div>)}</div>

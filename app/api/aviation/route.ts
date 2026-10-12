@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { fetchNearestAviationWeather, unavailableAviation } from "@/lib/providers/aviation-weather";
+import { numberParam, optionalNumberParam } from "@/lib/api-params";
 
-const schema = z.object({ lat: z.coerce.number().min(-90).max(90), lon: z.coerce.number().min(-180).max(180), elevation: z.coerce.number().default(0) });
+const schema = z.object({ lat: numberParam(-90, 90), lon: numberParam(-180, 180), elevation: optionalNumberParam(-500, 9000, 0) });
 
 export async function GET(request: Request) {
   const parsed = schema.safeParse(Object.fromEntries(new URL(request.url).searchParams));

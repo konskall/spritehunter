@@ -36,10 +36,36 @@ function visibilityMeters(value: number | string | null | undefined) {
   return Number.isFinite(miles) ? Math.round(miles * 1609.344) : null;
 }
 
-function cloudCoverPercent(clouds: z.infer<typeof cloudSchema>[]) {
-  if (!clouds.length) return null;
-  const fractions: Record<string, number> = { SKC: 0, CLR: 0, NSC: 0, NCD: 0, FEW: 20, SCT: 50, BKN: 80, OVC: 100, VV: 100 };
-  return Math.max(...clouds.map((cloud) => fractions[cloud.cover.toUpperCase()] ?? 0));
+const CLOUD_FRACTIONS: Record<string, number> = { SKC: 0, CLR: 0, NSC: 0, NCD: 0, CAVOK: 0, FEW: 20, SCT: 50, BKN: 80, OVC: 100, VV: 100 };
+const FRESH_REPORT_MINUTES = 90;
+
+/** Densest reported layer. METAR describes low/mid cloud only; it cannot confirm clear high cloud. */
+export function metarCloudCoverPercent(clouds: Array<{ cover: string }>, rawOb: string) {
+  const known = clouds.map((cloud) => CLOUD_FRACTIONS[cloud.cover.toUpperCase()]).filter((value): value is number => value !== undefined);
+  if (known.length) return Math.max(...known);
+  return /\b(CAVOK|NSC|NCD|SKC|CLR)\b/.test(rawOb) ? 0 : null;
+}
+
+interface StationReport {
+  icaoId: string;
+  obsTime: number;
+  lat: number;
+  lon: number;
+}
+
+/** Newest report per station; nearest fresh station first, otherwise the nearest stale one. */
+export function selectAviationReport<T extends StationReport>(reports: T[], observer: Coordinates, nowMs = Date.now()) {
+  const newest = new Map<string, T>();
+  for (const report of reports) {
+    const current = newest.get(report.icaoId);
+    if (!current || report.obsTime > current.obsTime) newest.set(report.icaoId, report);
+  }
+  const ranked = Array.from(newest.values()).map((report) => ({
+    report,
+    distanceKm: inverseGeodesic(observer, { latitude: report.lat, longitude: report.lon }).distanceM / 1000,
+    ageMinutes: Math.max(0, (nowMs - report.obsTime * 1000) / 60_000),
+  })).sort((a, b) => a.distanceKm - b.distanceKm);
+  return ranked.find((item) => item.ageMinutes <= FRESH_REPORT_MINUTES) ?? ranked[0] ?? null;
 }
 
 function cloudSummary(clouds: z.infer<typeof cloudSchema>[]) {
@@ -74,12 +100,8 @@ export async function fetchNearestAviationWeather(observer: Coordinates): Promis
     headers: { Accept: "application/json", "User-Agent": "SpriteHunter/0.3 (upper-atmosphere-observatory)" },
   });
   const reports = z.array(metarSchema).parse(raw);
-  if (!reports.length) return unavailableAviation("Δεν βρέθηκε πρόσφατος σταθμός METAR σε ακτίνα περίπου 280 km.", retrievedAt);
-  const ranked = reports.map((report) => ({
-    report,
-    distanceKm: inverseGeodesic(observer, { latitude: report.lat, longitude: report.lon }).distanceM / 1000,
-  })).sort((a, b) => a.distanceKm - b.distanceKm);
-  const nearest = ranked[0];
+  const nearest = selectAviationReport(reports, observer);
+  if (!nearest) return unavailableAviation("Δεν βρέθηκε πρόσφατος σταθμός METAR σε ακτίνα περίπου 280 km.", retrievedAt);
   let taf: z.infer<typeof tafSchema> | null = null;
   try {
     const tafRaw = await fetchJsonWithRetry<unknown>(`https://aviationweather.gov/api/data/taf?ids=${encodeURIComponent(nearest.report.icaoId)}&format=json&time=valid`, {
@@ -93,16 +115,16 @@ export async function fetchNearestAviationWeather(observer: Coordinates): Promis
   }
   const clouds = nearest.report.clouds ?? [];
   const observedAt = new Date(nearest.report.obsTime * 1000).toISOString();
-  const ageMinutes = Math.max(0, Math.round((Date.now() - nearest.report.obsTime * 1000) / 60_000));
+  const ageMinutes = Math.round(nearest.ageMinutes);
   return {
-    status: ageMinutes <= 120 ? "available" : "stale",
+    status: ageMinutes <= FRESH_REPORT_MINUTES ? "available" : "stale",
     stationId: nearest.report.icaoId,
     stationName: nearest.report.name ?? nearest.report.icaoId,
     distanceKm: Math.round(nearest.distanceKm),
     observedAt,
     retrievedAt,
     visibilityM: visibilityMeters(nearest.report.visib),
-    cloudCoverPercent: cloudCoverPercent(clouds),
+    cloudCoverPercent: metarCloudCoverPercent(clouds, nearest.report.rawOb ?? ""),
     cloudSummary: cloudSummary(clouds),
     windDirectionDeg: typeof nearest.report.wdir === "number" ? nearest.report.wdir : null,
     windSpeedKmh: nearest.report.wspd == null ? null : Math.round(nearest.report.wspd * 1.852),

@@ -1,4 +1,4 @@
-const CACHE = "spritehunter-shell-v3";
+const CACHE = "spritehunter-shell-v4";
 const SHELL = [
   "/",
   "/offline.html",
@@ -25,6 +25,24 @@ self.addEventListener("message", (event) => {
   if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
 
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      const client = clients.find((item) => new URL(item.url).origin === self.location.origin);
+      return client ? client.focus() : self.clients.openWindow("/");
+    }),
+  );
+});
+
+// Clone before handing the response to the page: a body that the browser has
+// started reading can no longer be cloned, which made cache updates fail.
+function cacheCopy(request, response) {
+  if (!response.ok) return;
+  const copy = response.clone();
+  caches.open(CACHE).then((cache) => cache.put(request, copy)).catch(() => undefined);
+}
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
@@ -34,7 +52,7 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       fetch(request)
         .then((response) => {
-          if (response.ok) caches.open(CACHE).then((cache) => cache.put(request, response.clone()));
+          cacheCopy(request, response);
           return response;
         })
         .catch(async () => (
@@ -49,7 +67,7 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     caches.match(request).then((cached) => {
       const network = fetch(request).then((response) => {
-        if (response.ok) caches.open(CACHE).then((cache) => cache.put(request, response.clone()));
+        cacheCopy(request, response);
         return response;
       }).catch(() => cached || Response.error());
       return cached || network;

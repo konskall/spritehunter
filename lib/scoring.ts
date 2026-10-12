@@ -1,24 +1,7 @@
-import type { ScoreBreakdown } from "@/lib/domain";
+import type { CandidateScoreInput, ScoreBreakdown, TerrainStatus } from "@/lib/domain";
 import { darknessScore } from "@/lib/astronomy";
 
-interface ScoreInput {
-  capeJkg: number | null;
-  convectiveInhibitionJkg?: number | null;
-  liftedIndex?: number | null;
-  precipitableWaterKgM2?: number | null;
-  precipitationMm: number | null;
-  thunderCode: boolean;
-  lightningPotentialJkg?: number | null;
-  observerCloudPercent: number | null;
-  observerHighCloudPercent: number | null;
-  visibilityM: number | null;
-  atmosphereSource?: "observation" | "forecast";
-  distanceKm: number;
-  sunAltitudeDeg: number;
-  moonInterference: boolean;
-  terrain: "clear" | "partial" | "blocked" | "unknown";
-  lightning: "observed" | "unavailable" | "not_configured";
-}
+type ScoreInput = CandidateScoreInput & { terrain: TerrainStatus };
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -100,4 +83,9 @@ export function scoreOpportunity(input: ScoreInput): ScoreBreakdown {
     reasons,
     limitations,
   };
+}
+
+/** Re-score a candidate once the DEM line-of-sight check for its bearing is known. */
+export function rescoreWithTerrain(input: CandidateScoreInput, terrain: TerrainStatus) {
+  return scoreOpportunity({ ...input, terrain });
 }

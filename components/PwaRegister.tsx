@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { CheckCircle2, Download, Share2, Smartphone, X } from "lucide-react";
 
 interface BeforeInstallPromptEvent extends Event {
@@ -12,46 +12,60 @@ interface NavigatorWithStandalone extends Navigator {
   standalone?: boolean;
 }
 
-function isStandalone() {
-  if (typeof window === "undefined") return false;
-  return window.matchMedia("(display-mode: standalone)").matches || Boolean((navigator as NavigatorWithStandalone).standalone);
+// The install prompt can fire before React hydrates, so it is captured at module load.
+let installPrompt: BeforeInstallPromptEvent | null = null;
+let installedThisSession = false;
+const listeners = new Set<() => void>();
+const notify = () => listeners.forEach((listener) => listener());
+
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    installPrompt = event as BeforeInstallPromptEvent;
+    notify();
+  });
+  window.addEventListener("appinstalled", () => {
+    installPrompt = null;
+    installedThisSession = true;
+    notify();
+  });
 }
 
+const STANDALONE_QUERY = "(display-mode: standalone)";
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  const media = window.matchMedia(STANDALONE_QUERY);
+  media.addEventListener("change", listener);
+  return () => {
+    listeners.delete(listener);
+    media.removeEventListener("change", listener);
+  };
+}
+
+const isInstalled = () => installedThisSession
+  || window.matchMedia(STANDALONE_QUERY).matches
+  || Boolean((navigator as NavigatorWithStandalone).standalone);
+const isIosDevice = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const noopSubscribe = () => () => undefined;
+
+/** Registers the service worker; the install entry point lives in the app top bar. */
 export default function PwaRegister() {
-  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [installed, setInstalled] = useState(true);
-  const [ready, setReady] = useState(false);
-  const [showHelp, setShowHelp] = useState(false);
-  const [installing, setInstalling] = useState(false);
-  const [isIos, setIsIos] = useState(false);
-
   useEffect(() => {
-    setInstalled(isStandalone());
-    setIsIos(/iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
-    setReady(true);
-
     if ("serviceWorker" in navigator && process.env.NODE_ENV === "production") {
       navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => undefined);
     }
-
-    const onBeforeInstall = (event: Event) => {
-      event.preventDefault();
-      setInstallPrompt(event as BeforeInstallPromptEvent);
-      setInstalled(false);
-    };
-    const onInstalled = () => {
-      setInstalled(true);
-      setInstallPrompt(null);
-      setShowHelp(false);
-    };
-
-    window.addEventListener("beforeinstallprompt", onBeforeInstall);
-    window.addEventListener("appinstalled", onInstalled);
-    return () => {
-      window.removeEventListener("beforeinstallprompt", onBeforeInstall);
-      window.removeEventListener("appinstalled", onInstalled);
-    };
   }, []);
+  return null;
+}
+
+export function PwaInstallButton() {
+  // Server snapshot reports "installed" so nothing renders before hydration.
+  const installed = useSyncExternalStore(subscribe, isInstalled, () => true);
+  const prompt = useSyncExternalStore(subscribe, () => installPrompt, () => null);
+  const isIos = useSyncExternalStore(noopSubscribe, isIosDevice, () => false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [installing, setInstalling] = useState(false);
 
   useEffect(() => {
     if (!showHelp) return;
@@ -63,34 +77,36 @@ export default function PwaRegister() {
   }, [showHelp]);
 
   const install = async () => {
-    if (!installPrompt) {
+    if (!prompt) {
       setShowHelp(true);
       return;
     }
     setInstalling(true);
     try {
-      await installPrompt.prompt();
-      const choice = await installPrompt.userChoice;
-      setInstallPrompt(null);
-      if (choice.outcome === "accepted") setInstalled(true);
+      await prompt.prompt();
+      const choice = await prompt.userChoice;
+      installPrompt = null;
+      if (choice.outcome === "accepted") installedThisSession = true;
+      notify();
     } finally {
       setInstalling(false);
     }
   };
 
-  if (!ready || installed) return null;
+  if (installed) return null;
 
   return (
     <>
-      <button className="pwa-install-chip" type="button" onClick={install} disabled={installing} aria-haspopup={!installPrompt ? "dialog" : undefined}>
-        <Download size={17} />
-        <span>{installing ? "Εγκατάσταση…" : "Εγκατάσταση εφαρμογής"}</span>
+      <button className="icon-button pwa-install-button" type="button" onClick={install} disabled={installing} title="Εγκατάσταση εφαρμογής" aria-label="Εγκατάσταση εφαρμογής" aria-haspopup={!prompt ? "dialog" : undefined}>
+        <Download size={18} />
+        <span>{installing ? "Εγκατάσταση…" : "Εγκατάσταση"}</span>
       </button>
 
       {showHelp && (
         <div className="pwa-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowHelp(false); }}>
           <section className="pwa-dialog" role="dialog" aria-modal="true" aria-labelledby="pwa-dialog-title">
             <button className="pwa-dialog-close" type="button" onClick={() => setShowHelp(false)} aria-label="Κλείσιμο"><X size={18} /></button>
+            {/* eslint-disable-next-line @next/next/no-img-element -- static PWA icon, not an LCP image */}
             <img src="/spritehunter-icon-192.png" width="64" height="64" alt="" />
             <span className="eyebrow">SPRITEHUNTER PWA</span>
             <h2 id="pwa-dialog-title">Εγκατάσταση στο κινητό</h2>

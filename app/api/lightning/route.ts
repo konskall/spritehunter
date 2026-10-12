@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
+import { numberParam, optionalNumberParam } from "@/lib/api-params";
+import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 const querySchema = z.object({
-  lat: z.coerce.number().min(-90).max(90),
-  lon: z.coerce.number().min(-180).max(180),
-  radiusKm: z.coerce.number().min(1).max(100).default(100),
+  lat: numberParam(-90, 90),
+  lon: numberParam(-180, 180),
+  radiusKm: optionalNumberParam(1, 100, 100),
 });
 const providerSchema = z.object({
   success: z.boolean(),
@@ -27,7 +29,13 @@ const providerSchema = z.object({
   })),
 });
 
+// Xweather is a paid, quota-metered provider.
+const allowRequest = createRateLimiter({ limit: 10, windowMs: 60_000 });
+
 export async function GET(request: Request) {
+  if (!allowRequest(clientKey(request))) {
+    return NextResponse.json({ status: "unavailable", events: [], message: "Rate limit exceeded." }, { status: 429, headers: { "Retry-After": "60" } });
+  }
   const clientId = process.env.XWEATHER_CLIENT_ID;
   const clientSecret = process.env.XWEATHER_CLIENT_SECRET;
   if (!clientId || !clientSecret) {

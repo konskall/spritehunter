@@ -73,6 +73,27 @@ export interface ScoreBreakdown {
   limitations: string[];
 }
 
+/** Everything the opportunity score needs except terrain, which is verified later per target. */
+export interface CandidateScoreInput {
+  capeJkg: number | null;
+  convectiveInhibitionJkg?: number | null;
+  liftedIndex?: number | null;
+  precipitableWaterKgM2?: number | null;
+  precipitationMm: number | null;
+  thunderCode: boolean;
+  lightningPotentialJkg?: number | null;
+  observerCloudPercent: number | null;
+  observerHighCloudPercent: number | null;
+  visibilityM: number | null;
+  atmosphereSource?: "observation" | "forecast";
+  distanceKm: number;
+  sunAltitudeDeg: number;
+  moonInterference: boolean;
+  lightning: "observed" | "unavailable" | "not_configured";
+}
+
+export type TerrainStatus = "clear" | "partial" | "blocked" | "unknown";
+
 export interface StormCandidate {
   id: string;
   coordinates: Coordinates;
@@ -92,6 +113,7 @@ export interface StormCandidate {
   windDirectionDeg: number | null;
   pointing: PointingAltitude[];
   score: ScoreBreakdown;
+  scoreInput: CandidateScoreInput;
   source: "forecast" | "observed";
   provenance: Provenance;
 }
@@ -155,6 +177,7 @@ export interface WeatherAlert {
   severity: string;
   onset: string | null;
   expires: string | null;
+  distanceKm: number | null;
   link: string;
 }
 
@@ -162,6 +185,8 @@ export interface WeatherAlertResponse {
   status: DataStatus;
   retrievedAt: string;
   updatedAt: string | null;
+  totalCount: number;
+  nearbyCount: number;
   alerts: WeatherAlert[];
   message: string;
 }

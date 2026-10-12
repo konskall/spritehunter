@@ -64,21 +64,31 @@ export async function fetchEumetsatMetadata(): Promise<EumetsatMetadata> {
   }
 }
 
-export function webMercatorTileBounds(x: number, y: number, zoom: number) {
-  const tiles = 2 ** zoom;
-  const longitude = (tileX: number) => tileX / tiles * 360 - 180;
-  const latitude = (tileY: number) => Math.atan(Math.sinh(Math.PI * (1 - 2 * tileY / tiles))) * 180 / Math.PI;
+const MERCATOR_HALF_WORLD_M = Math.PI * 6_378_137;
+
+/** Map world-pixel coordinates (256 px tiles) to EPSG:3857 metres. */
+export function worldPixelToMercator(x: number, y: number, zoom: number) {
+  const scale = 256 * 2 ** zoom;
   return {
-    west: longitude(x),
-    east: longitude(x + 1),
-    north: latitude(y),
-    south: latitude(y + 1),
+    x: (x / scale) * 2 * MERCATOR_HALF_WORLD_M - MERCATOR_HALF_WORLD_M,
+    y: MERCATOR_HALF_WORLD_M - (y / scale) * 2 * MERCATOR_HALF_WORLD_M,
   };
 }
 
-export function eumetsatTileUrl(kind: EumetsatProduct, x: number, y: number, zoom: number, time?: string | null) {
+export interface MercatorBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+/**
+ * One GetMap image for the whole viewport, in the map's own projection.
+ * Requesting CRS:84 (plate carrée) images for Mercator tiles shifted features
+ * by tens of kilometres, and per-tile requests took 12–16 s each in the browser.
+ */
+export function eumetsatImageUrl(kind: EumetsatProduct, bounds: MercatorBounds, width: number, height: number, time?: string | null) {
   const product = PRODUCTS[kind];
-  const bounds = webMercatorTileBounds(x, y, zoom);
   const params = new URLSearchParams({
     service: "WMS",
     version: "1.3.0",
@@ -87,10 +97,10 @@ export function eumetsatTileUrl(kind: EumetsatProduct, x: number, y: number, zoo
     styles: product.style,
     format: "image/png",
     transparent: "true",
-    width: "256",
-    height: "256",
-    crs: "CRS:84",
-    bbox: [bounds.west, bounds.south, bounds.east, bounds.north].map((value) => value.toFixed(6)).join(","),
+    width: String(Math.round(width)),
+    height: String(Math.round(height)),
+    crs: "EPSG:3857",
+    bbox: [bounds.minX, bounds.minY, bounds.maxX, bounds.maxY].map((value) => String(Math.round(value * 100) / 100)).join(","),
   });
   if (time) params.set("time", time);
   return `${EUMETSAT_WMS_URL}?${params}`;

@@ -14,7 +14,7 @@ import { shouldNotify } from "@/lib/notifications";
 import { clusterLightning, deduplicateLightning, estimateMotion } from "@/lib/storm-detection";
 import { athensUtcOffsetMinutes, dataFreshness } from "@/lib/time";
 import { skyState } from "@/lib/astronomy";
-import { eumetsatTileUrl, parseEumetsatCapabilities, webMercatorTileBounds } from "@/lib/providers/eumetsat";
+import { parseEumetsatCapabilities } from "@/lib/providers/eumetsat";
 import { clampMapZoom } from "@/components/StormMap";
 import { magneticDeclination, normalizeBearing } from "@/lib/wmm";
 import { parseMeteoAlarmFeed } from "@/lib/providers/meteoalarm";
@@ -115,15 +115,6 @@ describe("interactive map and EUMETSAT layers", () => {
     expect(result.lightningTime).toBe("2026-10-11T18:15:00Z");
     expect(result.infraredTime).toBe("2026-10-11T18:10:00Z");
     expect(result.cloudTopTime).toBe("2026-10-11T18:00:00Z");
-  });
-  it("builds a georeferenced transparent WMS tile request", () => {
-    const bounds = webMercatorTileBounds(8, 6, 4);
-    expect(bounds.west).toBeCloseTo(0, 6);
-    expect(bounds.east).toBeCloseTo(22.5, 6);
-    const url = new URL(eumetsatTileUrl("lightning", 8, 6, 4, "2026-10-11T18:15:00Z"));
-    expect(url.searchParams.get("layers")).toBe("mtg_fd:li_afa");
-    expect(url.searchParams.get("transparent")).toBe("true");
-    expect(url.searchParams.get("time")).toBe("2026-10-11T18:15:00Z");
   });
 });
 

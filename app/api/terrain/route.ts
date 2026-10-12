@@ -3,12 +3,15 @@ import { z } from "zod";
 import { apparentTerrainAngle, destinationPoint } from "@/lib/geodesy";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
 import type { TerrainProfile } from "@/lib/domain";
+import { numberParam, optionalNumberParam } from "@/lib/api-params";
+import { TtlCache } from "@/lib/bounded-cache";
+import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 const querySchema = z.object({
-  lat: z.coerce.number().min(-90).max(90),
-  lon: z.coerce.number().min(-180).max(180),
-  bearing: z.coerce.number().min(0).max(360),
-  cameraHeight: z.coerce.number().min(0).max(100).default(1.6),
+  lat: numberParam(-90, 90),
+  lon: numberParam(-180, 180),
+  bearing: numberParam(0, 360),
+  cameraHeight: optionalNumberParam(0, 100, 1.6),
 });
 const elevationSchema = z.object({
   status: z.string(),
@@ -17,17 +20,23 @@ const elevationSchema = z.object({
     location: z.object({ lat: z.number(), lng: z.number() }),
   })),
 });
-const cache = new Map<string, { expires: number; value: TerrainProfile }>();
+const cache = new TtlCache<TerrainProfile>(500);
+const CACHE_TTL_MS = 7 * 24 * 60 * 60_000;
+// OpenTopoData allows ~1 request/s and 1,000/day for the whole deployment.
+const allowRequest = createRateLimiter({ limit: 20, windowMs: 60_000 });
 const DISTANCES_KM = [0, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10, 15, 20, 30, 40, 55, 70, 90, 120];
 
 export async function GET(request: Request) {
+  if (!allowRequest(clientKey(request))) {
+    return NextResponse.json({ error: "Πάρα πολλά αιτήματα εδάφους. Δοκίμασε ξανά σε ένα λεπτό." }, { status: 429, headers: { "Retry-After": "60" } });
+  }
   const url = new URL(request.url);
   const parsed = querySchema.safeParse(Object.fromEntries(url.searchParams));
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   const { lat, lon, bearing, cameraHeight } = parsed.data;
   const key = `${lat.toFixed(4)}:${lon.toFixed(4)}:${bearing.toFixed(1)}:${cameraHeight}`;
   const cached = cache.get(key);
-  if (cached && cached.expires > Date.now()) return NextResponse.json(cached.value);
+  if (cached) return NextResponse.json(cached);
 
   const observer = { latitude: lat, longitude: lon };
   const points = DISTANCES_KM.map((distance) => destinationPoint(observer, distance, bearing));
@@ -36,7 +45,7 @@ export async function GET(request: Request) {
   try {
     const raw = await fetchJsonWithRetry<unknown>(
       `https://api.opentopodata.org/v1/srtm30m?locations=${encodeURIComponent(locations)}&interpolation=bilinear`,
-      { retries: 1, timeoutMs: 15_000 },
+      { retries: 1, timeoutMs: 12_000, deadlineMs: 18_000 },
     );
     const payload = elevationSchema.parse(raw);
     const observerGround = payload.results[0]?.elevation;
@@ -63,7 +72,7 @@ export async function GET(request: Request) {
       retrievedAt,
       message: "Sector profile sampled adaptively to 120 km; public DEM data can contain voids and is not a field survey.",
     };
-    cache.set(key, { expires: Date.now() + 7 * 24 * 60 * 60_000, value });
+    cache.set(key, value, CACHE_TTL_MS);
     return NextResponse.json(value, { headers: { "Cache-Control": "public, max-age=86400" } });
   } catch (error) {
     return NextResponse.json(
