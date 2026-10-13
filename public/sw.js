@@ -1,4 +1,4 @@
-const CACHE = "spritehunter-shell-v4";
+const CACHE = "spritehunter-shell-v5";
 const SHELL = [
   "/",
   "/offline.html",

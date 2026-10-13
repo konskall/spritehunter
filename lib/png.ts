@@ -67,18 +67,43 @@ export async function decodePng(bytes: Uint8Array): Promise<RgbaImage> {
   const stride = width * channels;
   if (raw.length < height * (stride + 1)) throw new Error("Truncated PNG image data.");
   const pixels = new Uint8Array(height * stride);
+  // One tight loop per filter type: a per-byte branch on the filter was ~4× slower.
+  // Uint8Array stores wrap modulo 256, which is exactly PNG's byte arithmetic.
   for (let y = 0; y < height; y += 1) {
     const filter = raw[y * (stride + 1)];
     const source = y * (stride + 1) + 1;
     const row = y * stride;
     const previous = row - stride;
-    for (let x = 0; x < stride; x += 1) {
-      const a = x >= channels ? pixels[row + x - channels] : 0;
-      const b = y > 0 ? pixels[previous + x] : 0;
-      const c = x >= channels && y > 0 ? pixels[previous + x - channels] : 0;
-      const predictor = filter === 0 ? 0 : filter === 1 ? a : filter === 2 ? b : filter === 3 ? (a + b) >> 1 : filter === 4 ? paeth(a, b, c) : -1;
-      if (predictor < 0) throw new Error(`Invalid PNG filter ${filter}.`);
-      pixels[row + x] = (raw[source + x] + predictor) & 255;
+    const first = y === 0;
+    switch (filter) {
+      case 0:
+        pixels.set(raw.subarray(source, source + stride), row);
+        break;
+      case 1:
+        for (let x = 0; x < channels; x += 1) pixels[row + x] = raw[source + x];
+        for (let x = channels; x < stride; x += 1) pixels[row + x] = raw[source + x] + pixels[row + x - channels];
+        break;
+      case 2:
+        if (first) pixels.set(raw.subarray(source, source + stride), row);
+        else for (let x = 0; x < stride; x += 1) pixels[row + x] = raw[source + x] + pixels[previous + x];
+        break;
+      case 3:
+        for (let x = 0; x < channels; x += 1) pixels[row + x] = raw[source + x] + (first ? 0 : pixels[previous + x] >> 1);
+        for (let x = channels; x < stride; x += 1) {
+          pixels[row + x] = raw[source + x] + ((pixels[row + x - channels] + (first ? 0 : pixels[previous + x])) >> 1);
+        }
+        break;
+      case 4:
+        for (let x = 0; x < channels; x += 1) pixels[row + x] = raw[source + x] + (first ? 0 : pixels[previous + x]);
+        for (let x = channels; x < stride; x += 1) {
+          const a = pixels[row + x - channels];
+          const b = first ? 0 : pixels[previous + x];
+          const c = first ? 0 : pixels[previous + x - channels];
+          pixels[row + x] = raw[source + x] + paeth(a, b, c);
+        }
+        break;
+      default:
+        throw new Error(`Invalid PNG filter ${filter}.`);
     }
   }
 

@@ -5,6 +5,7 @@ import { fetchJsonWithRetry } from "@/lib/providers/fetch";
 import type { TerrainProfile } from "@/lib/domain";
 import { numberParam, optionalNumberParam } from "@/lib/api-params";
 import { TtlCache } from "@/lib/bounded-cache";
+import { terrainBearingKey } from "@/lib/terrain";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 const querySchema = z.object({
@@ -33,7 +34,9 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const parsed = querySchema.safeParse(Object.fromEntries(url.searchParams));
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
-  const { lat, lon, bearing, cameraHeight } = parsed.data;
+  const { lat, lon, cameraHeight } = parsed.data;
+  // Whole degrees, so moving storms and other clients share profiles and the DEM quota.
+  const bearing = terrainBearingKey(parsed.data.bearing);
   const key = `${lat.toFixed(4)}:${lon.toFixed(4)}:${bearing.toFixed(1)}:${cameraHeight}`;
   const cached = cache.get(key);
   if (cached) return NextResponse.json(cached);

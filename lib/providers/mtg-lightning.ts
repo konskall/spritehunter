@@ -1,6 +1,6 @@
 import type { Coordinates, LightningCluster, LightningObservation } from "@/lib/domain";
 import { decodePng, type RgbaImage } from "@/lib/png";
-import { TtlCache } from "@/lib/bounded-cache";
+import { InFlight, TtlCache } from "@/lib/bounded-cache";
 import { EUMETSAT_WMS_URL } from "@/lib/providers/eumetsat";
 import { HttpError, fetchWithRetry } from "@/lib/providers/fetch";
 
@@ -22,6 +22,10 @@ const FRAME_COUNT = 3;
 const TARGET_DEGREES_PER_PIXEL = 0.04;
 const MAX_FRAME_PIXELS = 1024;
 const CLUSTER_CELL_DEGREES = 0.2;
+// A storm grows from its most active cell to connected cells within this radius. Squall
+// lines and frontal bands are split into several targets instead of one centroid that
+// may sit between storms, hundreds of kilometres from any lightning.
+const STORM_RADIUS_KM = 75;
 const STALE_AFTER_MINUTES = 45;
 // MTG-I sits at 0°; beyond ~65° from the sub-satellite point the full disk has no useful data.
 const MTG_COVERAGE_DEGREES = 65;
@@ -91,7 +95,8 @@ export function lightningFrameUrl(bounds: GeoBounds, width: number, height: numb
     request: "GetMap",
     layers: "mtg_fd:li_afa",
     styles: "mtg_li_afa",
-    format: "image/png",
+    // Palette PNG: same lit pixels and legend colours as RGBA, a quarter of the bytes to inflate.
+    format: "image/png8",
     transparent: "true",
     // CRS:84 keeps lon/lat axis order, and the plate carrée grid maps pixels straight to degrees.
     crs: "CRS:84",
@@ -104,8 +109,9 @@ export function lightningFrameUrl(bounds: GeoBounds, width: number, height: numb
 }
 
 /**
- * Groups lit AFA pixels from several frames into storms: pixels are binned into
- * 0.2° cells and 8-connected cells form one storm. Single isolated pixels are dropped.
+ * Groups lit AFA pixels from several frames into storms. Pixels are binned into 0.2°
+ * cells; each storm starts at the most active unassigned cell and takes the 8-connected
+ * cells within STORM_RADIUS_KM of it. Single isolated pixels are dropped.
  */
 export function clusterLightningFrames(frames: LightningFrame[], bounds: GeoBounds, nowMs = Date.now()): LightningCluster[] {
   if (!frames.length) return [];
@@ -133,24 +139,34 @@ export function clusterLightningFrames(frames: LightningFrame[], bounds: GeoBoun
 
   const cellPixels = Math.max(1, Math.round(CLUSTER_CELL_DEGREES / degLon));
   const cellColumns = Math.ceil(width / cellPixels);
-  const cells = new Map<number, number[]>();
-  for (const index of pixels.keys()) {
+  const cells = new Map<number, { members: number[]; weight: number }>();
+  for (const [index, pixel] of pixels) {
     const cell = Math.floor((index / width) / cellPixels) * cellColumns + Math.floor((index % width) / cellPixels);
-    const members = cells.get(cell);
-    if (members) members.push(index);
-    else cells.set(cell, [index]);
+    const entry = cells.get(cell);
+    if (entry) { entry.members.push(index); entry.weight += pixel.count; }
+    else cells.set(cell, { members: [index], weight: pixel.count });
   }
+  const cellCenter = (cell: number) => ({
+    latitude: bounds.north - (Math.floor(cell / cellColumns) + 0.5) * cellPixels * degLat,
+    longitude: bounds.west + ((cell % cellColumns) + 0.5) * cellPixels * degLon,
+  });
+  const kmBetween = (a: Coordinates, b: Coordinates) => Math.hypot(
+    (a.longitude - b.longitude) * 111.32 * Math.cos((((a.latitude + b.latitude) / 2) * Math.PI) / 180),
+    (a.latitude - b.latitude) * 110.57,
+  );
 
   const visited = new Set<number>();
   const clusters: LightningCluster[] = [];
-  for (const startCell of cells.keys()) {
-    if (visited.has(startCell)) continue;
-    visited.add(startCell);
-    const queue = [startCell];
+  const seeds = [...cells.keys()].sort((a, b) => cells.get(b)!.weight - cells.get(a)!.weight || a - b);
+  for (const seed of seeds) {
+    if (visited.has(seed)) continue;
+    visited.add(seed);
+    const seedCenter = cellCenter(seed);
+    const queue = [seed];
     const members: number[] = [];
     for (let cursor = 0; cursor < queue.length; cursor += 1) {
       const cell = queue[cursor];
-      members.push(...cells.get(cell)!);
+      for (const member of cells.get(cell)!.members) members.push(member);
       const row = Math.floor(cell / cellColumns);
       const column = cell % cellColumns;
       for (let dy = -1; dy <= 1; dy += 1) {
@@ -158,7 +174,9 @@ export function clusterLightningFrames(frames: LightningFrame[], bounds: GeoBoun
           const nextColumn = column + dx;
           if (nextColumn < 0 || nextColumn >= cellColumns) continue;
           const next = (row + dy) * cellColumns + nextColumn;
-          if (cells.has(next) && !visited.has(next)) { visited.add(next); queue.push(next); }
+          if (!cells.has(next) || visited.has(next) || kmBetween(seedCenter, cellCenter(next)) > STORM_RADIUS_KM) continue;
+          visited.add(next);
+          queue.push(next);
         }
       }
     }
@@ -187,7 +205,11 @@ export function clusterLightningFrames(frames: LightningFrame[], bounds: GeoBoun
     const centroid = { latitude: latSum / weight, longitude: lonSum / weight };
     const kmPerLon = 111.32 * Math.cos((centroid.latitude * Math.PI) / 180);
     const halfPixelKm = Math.hypot(degLon * kmPerLon, degLat * 110.57) / 2;
-    const radiusKm = Math.max(...points.map((point) => Math.hypot((point.longitude - centroid.longitude) * kmPerLon, (point.latitude - centroid.latitude) * 110.57))) + halfPixelKm;
+    let farthestKm = 0;
+    for (const point of points) {
+      farthestKm = Math.max(farthestKm, Math.hypot((point.longitude - centroid.longitude) * kmPerLon, (point.latitude - centroid.latitude) * 110.57));
+    }
+    const radiusKm = farthestKm + halfPixelKm;
     let frameCount = 0;
     for (let bits = frameMask; bits; bits &= bits - 1) frameCount += 1;
     clusters.push({
@@ -219,6 +241,7 @@ async function fetchFrame(bounds: GeoBounds, width: number, height: number, time
 }
 
 const observationCache = new TtlCache<LightningObservation>(50);
+const observationInFlight = new InFlight<LightningObservation>();
 const CACHE_TTL_MS = 4 * 60_000;
 const FAILURE_TTL_MS = 60_000;
 
@@ -234,7 +257,11 @@ export async function fetchLightningObservation(observer: Coordinates, radiusKm:
   const key = [bounds.west, bounds.south, bounds.east, bounds.north].join(":");
   const cached = observationCache.get(key, nowMs);
   if (cached) return cached;
+  return observationInFlight.run(key, () => loadObservation(bounds, key, nowMs));
+}
 
+async function loadObservation(bounds: GeoBounds, key: string, nowMs: number): Promise<LightningObservation> {
+  const retrievedAt = new Date(nowMs).toISOString();
   try {
     const { width, height } = lightningFrameSize(bounds);
     const latest = await fetchFrame(bounds, width, height);

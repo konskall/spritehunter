@@ -83,8 +83,11 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerX: number; pointerY: number; centerX: number; centerY: number } | null>(null);
   const pointersRef = useRef(new Map<number, { x: number; y: number }>());
-  const pinchRef = useRef<{ distance: number; zoom: number } | null>(null);
+  // Two-finger gesture: start distance and midpoint, and the map centre in world pixels at its zoom.
+  const pinchRef = useRef<{ distance: number; zoom: number; midX: number; midY: number; centerX: number; centerY: number } | null>(null);
   const lastWheelRef = useRef(0);
+  const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [gestureHint, setGestureHint] = useState(false);
   const [size, setSize] = useState({ width: 900, height: 560 });
   const [center, setCenter] = useState<Coordinates>(observer);
   const [zoom, setZoom] = useState(4);
@@ -118,6 +121,18 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
     };
     element.addEventListener("wheel", onWheel, { passive: false });
     return () => element.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // iOS Safari zooms the whole page on a pinch unless its own gesture events are cancelled.
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    const prevent = (event: Event) => event.preventDefault();
+    element.addEventListener("gesturestart", prevent);
+    return () => {
+      element.removeEventListener("gesturestart", prevent);
+      if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    };
   }, []);
 
   useEffect(() => setCenter(observer), [observer]);
@@ -199,32 +214,74 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
   const uncertaintyPoints = selected
     ? Array.from({ length: 73 }, (_, index) => scene.project(destinationPoint(selected.coordinates, selected.uncertaintyKm, index * 5))).map((point) => `${point.x},${point.y}`).join(" ")
     : "";
+  // Score labels only where they do not overlap; the selected target, then higher scores, win.
+  const labelled = new Set<string>();
+  const placedLabels: Array<{ x: number; y: number }> = [];
+  for (const candidate of [...candidates].sort((a, b) => Number(b.id === selectedId) - Number(a.id === selectedId) || b.score.total - a.score.total)) {
+    const point = scene.project(candidate.coordinates);
+    if (placedLabels.some((other) => Math.abs(other.x - point.x) < 26 && Math.abs(other.y - point.y) < 16)) continue;
+    placedLabels.push(point);
+    labelled.add(candidate.id);
+  }
 
   const recenter = () => setCenter(observer);
   const changeZoom = (delta: number) => setZoom((current) => clampMapZoom(current + delta));
+  const showGestureHint = () => {
+    setGestureHint(true);
+    if (hintTimerRef.current) clearTimeout(hintTimerRef.current);
+    hintTimerRef.current = setTimeout(() => setGestureHint(false), 1_600);
+  };
+  // Cooperative gestures on touch screens: one finger scrolls the page (the map would
+  // otherwise trap scrolling on phones), two fingers move and zoom the map. Mouse and
+  // pen drag the map directly.
   const pointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
-    if (event.target instanceof Element && event.target.closest("[data-map-interactive]")) return;
+    // A mouse press on a marker selects it instead of dragging. Fingers are always tracked:
+    // one of the two may land on a marker, and a tap still selects it through its click.
+    const onMarker = event.target instanceof Element && event.target.closest("[data-map-interactive]");
+    if (onMarker && event.pointerType !== "touch") return;
+    // A primary pointer starts a new gesture: drop pointers whose up/cancel never arrived
+    // (interrupted system gestures), or a pinch would track two stale points.
+    if (event.isPrimary) {
+      pointersRef.current.clear();
+      pinchRef.current = null;
+    }
     pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    event.currentTarget.setPointerCapture(event.pointerId);
     if (pointersRef.current.size >= 2) {
       const [first, second] = Array.from(pointersRef.current.values());
-      pinchRef.current = { distance: Math.hypot(first.x - second.x, first.y - second.y), zoom };
+      const point = worldPoint(center, zoom);
+      pinchRef.current = {
+        distance: Math.hypot(first.x - second.x, first.y - second.y),
+        zoom,
+        midX: (first.x + second.x) / 2,
+        midY: (first.y + second.y) / 2,
+        centerX: point.x,
+        centerY: point.y,
+      };
       dragRef.current = null;
       return;
     }
+    if (event.pointerType === "touch") return;
+    event.currentTarget.setPointerCapture(event.pointerId);
     const point = worldPoint(center, zoom);
     dragRef.current = { pointerX: event.clientX, pointerY: event.clientY, centerX: point.x, centerY: point.y };
   };
   const pointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!pointersRef.current.has(event.pointerId)) return;
     pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    if (pointersRef.current.size >= 2 && pinchRef.current) {
+    const pinch = pinchRef.current;
+    if (pointersRef.current.size >= 2 && pinch) {
       const [first, second] = Array.from(pointersRef.current.values());
       const distance = Math.hypot(first.x - second.x, first.y - second.y);
-      if (pinchRef.current.distance > 0) {
-        setZoom(clampMapZoom(Math.round(pinchRef.current.zoom + Math.log2(distance / pinchRef.current.distance))));
-      }
+      const nextZoom = pinch.distance > 0 ? clampMapZoom(Math.round(pinch.zoom + Math.log2(distance / pinch.distance))) : pinch.zoom;
+      const factor = 2 ** (nextZoom - pinch.zoom);
+      const next = worldCoordinates(
+        pinch.centerX * factor - ((first.x + second.x) / 2 - pinch.midX),
+        pinch.centerY * factor - ((first.y + second.y) / 2 - pinch.midY),
+        nextZoom,
+      );
+      setZoom(nextZoom);
+      setCenter({ latitude: Math.max(-80, Math.min(80, next.latitude)), longitude: next.longitude });
       return;
     }
     const drag = dragRef.current;
@@ -233,6 +290,8 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
     setCenter({ latitude: Math.max(-80, Math.min(80, next.latitude)), longitude: next.longitude });
   };
   const pointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    // The browser cancels a lone touch when it takes over to scroll the page.
+    if (event.type === "pointercancel" && event.pointerType === "touch" && pointersRef.current.size === 1) showGestureHint();
     pointersRef.current.delete(event.pointerId);
     dragRef.current = null;
     if (pointersRef.current.size < 2) pinchRef.current = null;
@@ -258,7 +317,7 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
       ref={containerRef}
       className="storm-map tile-map"
       aria-label="Διαδραστικός χάρτης υποψήφιων καταιγίδων"
-      aria-description="Μεγέθυνση με τα κουμπιά, τη ροδέλα, διπλό πάτημα ή χειρονομία δύο δαχτύλων."
+      aria-description="Μεγέθυνση με τα κουμπιά, τη ροδέλα ή διπλό πάτημα. Σε οθόνη αφής ο χάρτης μετακινείται με δύο δάχτυλα."
       tabIndex={0}
       onPointerDown={pointerDown}
       onPointerMove={pointerMove}
@@ -291,9 +350,17 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
         {candidates.map((candidate) => {
           const point = scene.project(candidate.coordinates);
           const selectedCandidate = candidate.id === selectedId;
-          return <g key={candidate.id} data-map-interactive className={`candidate-marker ${selectedCandidate ? "selected" : ""} ${candidate.observedLightning ? "observed" : ""}`} transform={`translate(${point.x} ${point.y})`} role="button" tabIndex={0} aria-label={`${candidate.source === "observed" ? "Παρατηρημένη καταιγίδα" : "Στόχος"} ${candidate.bearingDeg.toFixed(0)} μοιρών, δείκτης ${candidate.score.total}`} onClick={(event) => { event.stopPropagation(); onSelect(candidate.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(candidate.id); }}><circle className="candidate-halo" r={selectedCandidate ? 19 : 13} /><circle className="candidate-core" r={Math.max(6, candidate.score.total / 9)} /><text y="-19" textAnchor="middle">{candidate.score.total}</text></g>;
+          return <g key={candidate.id} data-map-interactive className={`candidate-marker ${selectedCandidate ? "selected" : ""} ${candidate.observedLightning ? "observed" : ""}`} transform={`translate(${point.x} ${point.y})`} role="button" tabIndex={0} aria-label={`${candidate.source === "observed" ? "Παρατηρημένη καταιγίδα" : "Στόχος"} ${candidate.bearingDeg.toFixed(0)} μοιρών, δείκτης ${candidate.score.total}`} onClick={(event) => { event.stopPropagation(); onSelect(candidate.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(candidate.id); }}><circle className="candidate-halo" r={selectedCandidate ? 19 : 13} /><circle className="candidate-core" r={Math.max(6, candidate.score.total / 9)} /></g>;
         })}
+        {/* Labels in their own layer, so no marker drawn later can cover them. */}
+        <g className="candidate-labels" aria-hidden="true">
+          {candidates.filter((candidate) => labelled.has(candidate.id)).map((candidate) => {
+            const point = scene.project(candidate.coordinates);
+            return <text key={candidate.id} x={point.x} y={point.y - 19} textAnchor="middle">{candidate.score.total}</text>;
+          })}
+        </g>
       </svg>
+      {gestureHint && <div className="map-gesture-hint" role="status">Χρησιμοποίησε δύο δάχτυλα για να μετακινήσεις τον χάρτη</div>}
       <div className="map-controls" data-map-interactive onPointerDown={(event) => event.stopPropagation()}>
         <button type="button" onClick={() => changeZoom(1)} disabled={zoom === MAX_ZOOM} aria-label="Μεγέθυνση"><Plus size={17} /></button>
         <span className="map-zoom-level" aria-live="polite">z{zoom}</span>
@@ -301,7 +368,7 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
         <button type="button" onClick={recenter} aria-label="Κεντράρισμα στη θέση παρατήρησης"><LocateFixed size={17} /></button>
       </div>
       <div className="map-status">
-        <span>Zoom: κουμπιά · ροδέλα · pinch</span>
+        <span>Zoom: κουμπιά · ροδέλα · 2 δάχτυλα</span>
         {lightningVisible && <span>{lightningOverlay && overlayFailed(lightningOverlay) ? "MTG-LI προσωρινά μη διαθέσιμο (EUMETView)" : lightningOverlay && !loadedOverlays.has(lightningOverlay.src) ? "MTG-LI φορτώνει…" : satelliteLabel(eumetsat)}</span>}
         <span>{radarVisible ? radarLabel(radar) : "Radar κρυφό"}</span>
       </div>

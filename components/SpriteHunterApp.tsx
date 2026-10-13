@@ -54,7 +54,9 @@ import type {
 import { CANON_750D, DEFAULT_LENSES, effectiveMaxAperture, fieldOfView, framingAssessment, photoRecommendation } from "@/lib/camera";
 import { angularDifference, inverseGeodesic } from "@/lib/geodesy";
 import { skyState } from "@/lib/astronomy";
-import { terrainVisibility } from "@/lib/terrain";
+import { terrainBearingKey, terrainVisibility } from "@/lib/terrain";
+import { followSelection } from "@/lib/selection";
+import { createId } from "@/lib/utils";
 import { formatAthens } from "@/lib/time";
 import { magneticDeclination, normalizeBearing } from "@/lib/wmm";
 import { cameraPointing } from "@/lib/orientation";
@@ -349,15 +351,18 @@ export default function SpriteHunterApp() {
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
   const requestRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const loadedOnceRef = useRef(false);
+  // The target shown before a refresh, so a moving storm (new id) stays selected.
+  const selectedRef = useRef<StormCandidate | null>(null);
   const mobileNavRef = useRef<HTMLElement>(null);
   const hydrated = observerHydrated && rangeHydrated;
   const t = strings[language];
 
   const rawSelected = data?.candidates.find((candidate) => candidate.id === selectedId) ?? data?.candidates[0] ?? null;
+  useEffect(() => { selectedRef.current = rawSelected; }, [rawSelected]);
   // Once the DEM line of sight for the selected bearing is known, re-score that target so
   // the terrain component and confidence reflect the verified horizon everywhere it is shown.
   const selected = useMemo(() => {
-    if (!rawSelected?.scoreInput || !terrain || Math.abs(terrain.bearingDeg - rawSelected.bearingDeg) > 0.05) return rawSelected;
+    if (!rawSelected?.scoreInput || !terrain || terrain.bearingDeg !== terrainBearingKey(rawSelected.bearingDeg)) return rawSelected;
     const visibility = terrainVisibility(terrain, rawSelected.pointing);
     return visibility.status === "unknown" ? rawSelected : { ...rawSelected, score: rescoreWithTerrain(rawSelected.scoreInput, visibility.status) };
   }, [rawSelected, terrain]);
@@ -421,7 +426,7 @@ export default function SpriteHunterApp() {
       if (!isCurrent()) return;
       loadedOnceRef.current = true;
       setData(payload);
-      setSelectedId((current) => payload.candidates.some((candidate) => candidate.id === current) ? current : payload.candidates[0]?.id ?? null);
+      setSelectedId(followSelection(selectedRef.current, payload.candidates));
     } catch (refreshError) {
       if (!isCurrent() || controller.signal.aborted) return;
       setError(refreshError instanceof Error ? refreshError.message : "Άγνωστο σφάλμα δεδομένων.");
@@ -473,7 +478,7 @@ export default function SpriteHunterApp() {
       .finally(() => { if (!controller.signal.aborted) setAuroraLoading(false); });
     return () => controller.abort();
   }, [auroraActive, hydrated, observer.latitude, observer.longitude]);
-  const terrainBearing = rawSelected?.bearingDeg ?? null;
+  const terrainBearing = rawSelected ? terrainBearingKey(rawSelected.bearingDeg) : null;
   useEffect(() => {
     if (terrainBearing == null || !hydrated) { setTerrain(null); return; }
     const controller = new AbortController();
@@ -511,6 +516,9 @@ export default function SpriteHunterApp() {
   }, [screen]);
 
   const selectCandidate = (id: string) => setSelectedId(id);
+  // A new screen starts at its top: otherwise it opened at the previous screen's scroll
+  // position, often past its heading.
+  useEffect(() => { window.scrollTo(0, 0); }, [screen]);
   const goPoint = () => setScreen("point");
   const requestNotifications = async () => {
     if (typeof Notification === "undefined") return;
@@ -592,7 +600,7 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
   const observedSky = aviation?.status === "available" && aviation.cloudCoverPercent != null ? aviation : null;
   const alerts = data?.weatherAlerts;
   const lightning = data?.lightning;
-  const observedTargets = candidates.filter((candidate) => candidate.source === "observed").length;
+  const observedTargets = lightning?.inRangeCount ?? candidates.filter((candidate) => candidate.source === "observed").length;
   const alertTotal = alerts?.totalCount ?? alerts?.alerts.length ?? 0;
   const providers = (data?.providers ?? []).map((provider) => provider.id === "rainviewer"
     ? { ...provider, status: radarStatus, message: radarStatus === "available" ? "Live metadata διαθέσιμα· η γεωγραφική κάλυψη παραμένει best-effort." : "Το live radar metadata δεν απάντησε τώρα." }
@@ -600,7 +608,7 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
   return (
     <div className="view-stack">
       <section className="hero-panel">
-        <div className="eyebrow"><span className="live-pulse" /> NIGHT WATCH · {clock ? formatAthens(new Date(clock), language) : "—"}</div>
+        <div className="eyebrow"><span className="live-pulse" /> {clock && skyState(new Date(clock), observer.latitude, observer.longitude, 0).sunAltitudeDeg > -6 ? "DAY WATCH" : "NIGHT WATCH"} · {clock ? formatAthens(new Date(clock), language) : "—"}</div>
         <div className="hero-grid">
           <div className="hero-copy">
             <span className={`opportunity-kicker ${selected ? `category-${selected.score.category}` : ""}`}>{loading && !data ? "Σάρωση Μεσογείου…" : error ? t.insufficient : categoryLabel(selected, language)}</span>
@@ -621,7 +629,7 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
         <div className="hero-metrics">
           <Metric icon={Navigation} label="Αληθές αζιμούθιο" value={selected ? `${selected.bearingDeg.toFixed(1)}° · ${directionLabel(selected.bearingDeg, language)}` : "—"} />
           <Metric icon={Gauge} label="Απόσταση" value={selected ? `${selected.distanceKm.toFixed(0)} km` : "—"} hint="γεωδαιτική WGS84" />
-          <Metric icon={Cloud} label={observedSky ? "Χαμηλή νέφωση (METAR)" : "Υψηλή νέφωση εδώ"} value={observedSky ? `${observedSky.cloudCoverPercent}%` : nowHour?.cloudCoverHigh != null ? `${nowHour.cloudCoverHigh}%` : "—"} hint={observedSky ? `${observedSky.stationId} · ${observedSky.distanceKm} km · υψηλή ${nowHour?.cloudCoverHigh ?? "—"}%` : "πρόγνωση μοντέλου"} />
+          <Metric icon={Cloud} label={observedSky ? "Νέφωση (METAR)" : "Υψηλή νέφωση εδώ"} value={observedSky ? `${observedSky.cloudCoverPercent}%` : nowHour?.cloudCoverHigh != null ? `${nowHour.cloudCoverHigh}%` : "—"} hint={observedSky ? `${observedSky.stationId} · ${observedSky.distanceKm} km · υψηλή ${nowHour?.cloudCoverHigh ?? "—"}%` : "πρόγνωση μοντέλου"} />
           <Metric icon={Moon} label="Χρήσιμη ανύψωση" value={selected ? `${selected.pointing[0].elevationDeg.toFixed(1)}°–${selected.pointing.at(-1)!.elevationDeg.toFixed(1)}°` : "—"} hint="50–90 km" />
         </div>
       </section>
@@ -881,7 +889,7 @@ function LocationsView({ observer, locations, candidate, onObserver, onLocations
   const [name, setName] = useState("");
   const [gpsStatus, setGpsStatus] = useState("");
   const addCurrent = () => {
-    const item = { ...observer, id: crypto.randomUUID(), name: name.trim() || `Θέση ${locations.length + 1}`, favorite: false };
+    const item = { ...observer, id: createId(), name: name.trim() || `Θέση ${locations.length + 1}`, favorite: false };
     onLocations([...locations, item]); setName("");
   };
   const useGps = () => {
@@ -895,7 +903,7 @@ function LocationsView({ observer, locations, candidate, onObserver, onLocations
 function CameraView({ candidate, lenses, selectedLens, fov, framing, orientation, sky, onSelect, onLenses, onOrientation }: { candidate: StormCandidate | null; lenses: LensProfile[]; selectedLens: LensProfile; fov: { horizontalDeg: number; verticalDeg: number }; framing: ReturnType<typeof framingAssessment> | null; orientation: "landscape" | "portrait"; sky: ReturnType<typeof skyState> | null; onSelect: (id: string) => void; onLenses: (value: LensProfile[]) => void; onOrientation: (value: "landscape" | "portrait") => void }) {
   const [custom, setCustom] = useState({ name: "", focal: 24, aperture: 2.8 });
   const recommendation = photoRecommendation(selectedLens, sky?.moonInterference ?? false, candidate ? (Math.atan2(candidate.uncertaintyKm, candidate.distanceKm) * 360) / Math.PI : 10);
-  const addLens = (event: FormEvent) => { event.preventDefault(); if (!custom.name.trim() || custom.focal <= 0 || custom.aperture <= 0) return; const lens: LensProfile = { id: crypto.randomUUID(), name: custom.name, focalLengthMm: custom.focal, maxAperture: custom.aperture, mount: "Canon EF/EF-S", owned: true }; onLenses([...lenses, lens]); onSelect(lens.id); setCustom({ name: "", focal: 24, aperture: 2.8 }); };
+  const addLens = (event: FormEvent) => { event.preventDefault(); if (!custom.name.trim() || custom.focal <= 0 || custom.aperture <= 0) return; const lens: LensProfile = { id: createId(), name: custom.name, focalLengthMm: custom.focal, maxAperture: custom.aperture, mount: "Canon EF/EF-S", owned: true }; onLenses([...lenses, lens]); onSelect(lens.id); setCustom({ name: "", focal: 24, aperture: 2.8 }); };
   return (
     <div className="view-stack">
       <div className="view-heading">
@@ -953,7 +961,7 @@ function CameraView({ candidate, lenses, selectedLens, fov, framing, orientation
 
 function LogbookView({ logs, candidate, lens, onLogs }: { logs: LogEntry[]; candidate: StormCandidate | null; lens: LensProfile; onLogs: (value: LogEntry[]) => void }) {
   const [form, setForm] = useState({ tleType: "Red Sprite", iso: 3200, aperture: effectiveMaxAperture(lens), shutter: "3 s", success: "uncertain" as LogEntry["success"], notes: "" });
-  const add = (event: FormEvent) => { event.preventDefault(); onLogs([{ id: crypto.randomUUID(), timestamp: new Date().toISOString(), target: candidate ? `${candidate.bearingDeg.toFixed(1)}° / ${candidate.distanceKm.toFixed(0)} km` : "Χωρίς στόχο", lens: lens.name, ...form }, ...logs]); setForm({ ...form, notes: "" }); };
+  const add = (event: FormEvent) => { event.preventDefault(); onLogs([{ id: createId(), timestamp: new Date().toISOString(), target: candidate ? `${candidate.bearingDeg.toFixed(1)}° / ${candidate.distanceKm.toFixed(0)} km` : "Χωρίς στόχο", lens: lens.name, ...form }, ...logs]); setForm({ ...form, notes: "" }); };
   const download = (format: "json" | "csv") => {
     const content = format === "json" ? JSON.stringify(logs, null, 2) : ["timestamp,target,tleType,lens,iso,aperture,shutter,success,notes", ...logs.map((entry) => [entry.timestamp, entry.target, entry.tleType, entry.lens, entry.iso, entry.aperture, entry.shutter, entry.success, entry.notes].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","))].join("\n");
     const url = URL.createObjectURL(new Blob([content], { type: format === "json" ? "application/json" : "text/csv" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `spritehunter-logbook.${format}`; anchor.click(); URL.revokeObjectURL(url);
@@ -967,7 +975,7 @@ function AlertsView({ candidate, prefs, lastAlert, permission, onPrefs, onReques
   const minimumScore = prefs.minimumScore;
   const passes = candidate != null && candidate.score.total >= minimumScore;
   const permissionLabel = { granted: "επιτρέπεται", denied: "απορρίφθηκε (άλλαξέ το από τις ρυθμίσεις του browser)", default: "δεν έχει ζητηθεί", unsupported: "δεν υποστηρίζεται σε αυτόν τον browser" }[permission];
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">EVENT-DRIVEN WATCH</span><h1>Ειδοποιήσεις</h1><p>Ειδοποίηση μόνο όταν η ευκαιρία αλλάζει ουσιαστικά — όχι συνεχής θόρυβος.</p></div><Bell size={30} /></div><div className="alerts-grid"><section className="panel alert-settings"><h2>Κανόνες ειδοποίησης</h2><label>Ελάχιστος δείκτης <strong>{minimumScore}/100</strong><input type="range" min="30" max="95" value={minimumScore} onChange={(event) => onPrefs({ ...prefs, minimumScore: Number(event.target.value) })} /></label><p className="data-note">{minimumScore > MAX_FORECAST_SCORE ? `Πάνω από ${MAX_FORECAST_SCORE} ειδοποιείσαι μόνο για καταιγίδες με παρατηρημένους κεραυνούς MTG-LI.` : `Οι προγνωστικοί στόχοι φτάνουν έως ${MAX_FORECAST_SCORE}· πάνω από αυτό απαιτούνται παρατηρημένοι κεραυνοί.`}</p><label>Ελάχιστη εμπιστοσύνη<select value={prefs.confidence} onChange={(event) => onPrefs({ ...prefs, confidence: event.target.value as AlertPreferences["confidence"] })}><option value="low">Χαμηλή</option><option value="medium">Μέτρια (επαληθευμένο έδαφος ή παρατηρημένοι κεραυνοί)</option><option value="high">Υψηλή (παρατηρημένοι κεραυνοί και επαληθευμένο έδαφος)</option></select></label><label>Cooldown (λεπτά)<NumberField min={0} max={1440} value={prefs.cooldown} onCommit={(cooldown) => onPrefs({ ...prefs, cooldown })} /></label><div className="two-fields"><label>Έναρξη ησυχίας<input type="time" value={prefs.quietStart} onChange={(event) => event.target.value && onPrefs({ ...prefs, quietStart: event.target.value })} /></label><label>Λήξη ησυχίας<input type="time" value={prefs.quietEnd} onChange={(event) => event.target.value && onPrefs({ ...prefs, quietEnd: event.target.value })} /></label></div><button className="secondary-action" onClick={onRequestPermission} disabled={permission === "granted" || permission === "unsupported"}><Bell size={17} />{permission === "granted" ? "Οι ειδοποιήσεις είναι ενεργές" : "Άδεια browser notification"}</button><p className="data-note">Κατάσταση άδειας: {permissionLabel}{lastAlert ? ` · τελευταία ειδοποίηση ${formatAthens(lastAlert.at)} (δείκτης ${lastAlert.score})` : ""}</p></section><section className="panel"><span className="eyebrow">CURRENT EVALUATION</span><h2>{passes ? "Περνά το όριο δείκτη" : "Δεν περνά το όριο"}</h2><div className="alert-preview"><Bell size={20} /><div><strong>Παράδειγμα παραγόμενης ειδοποίησης</strong><p>{candidate ? `${alertBody(candidate)} Δείκτης ${candidate.score.total}/100 (${confidenceLabel(candidate.score.confidence).toLowerCase()} εμπιστοσύνη).` : "Δεν υπάρχει κατάλληλος στόχος τώρα."}</p></div></div><div className="warning-box"><AlertTriangle size={17} /><p><strong>Ο browser δεν είναι server.</strong> Όσο η εφαρμογή είναι ανοιχτή, ελέγχει ξανά κάθε 15 λεπτά και ειδοποιεί σύμφωνα με τους κανόνες, εκτός από τις ώρες ησυχίας. Με κλειστή εφαρμογή δεν γίνεται παρακολούθηση· αυτό απαιτεί server push και προγραμματισμένο worker.</p></div></section></div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">EVENT-DRIVEN WATCH</span><h1>Ειδοποιήσεις</h1><p>Ειδοποίηση μόνο όταν η ευκαιρία αλλάζει ουσιαστικά — όχι συνεχής θόρυβος.</p></div><Bell size={30} /></div><div className="alerts-grid"><section className="panel alert-settings"><h2>Κανόνες ειδοποίησης</h2><label>Ελάχιστος δείκτης <strong>{minimumScore}/100</strong><input type="range" min="30" max="95" value={minimumScore} onChange={(event) => onPrefs({ ...prefs, minimumScore: Number(event.target.value) })} /></label><p className="data-note">{minimumScore > MAX_FORECAST_SCORE ? `Πάνω από ${MAX_FORECAST_SCORE} ειδοποιείσαι μόνο για καταιγίδες με παρατηρημένους κεραυνούς MTG-LI.` : `Οι προγνωστικοί στόχοι φτάνουν έως ${MAX_FORECAST_SCORE}· πάνω από αυτό απαιτούνται παρατηρημένοι κεραυνοί.`}</p><label>Ελάχιστη εμπιστοσύνη<select value={prefs.confidence} onChange={(event) => onPrefs({ ...prefs, confidence: event.target.value as AlertPreferences["confidence"] })}><option value="low">Χαμηλή</option><option value="medium">Μέτρια — έδαφος ή κεραυνοί</option><option value="high">Υψηλή — κεραυνοί και έδαφος</option></select></label><p className="data-note">Μέτρια: επαληθευμένο έδαφος ή παρατηρημένοι κεραυνοί MTG-LI. Υψηλή: και τα δύο.</p><label>Cooldown (λεπτά)<NumberField min={0} max={1440} value={prefs.cooldown} onCommit={(cooldown) => onPrefs({ ...prefs, cooldown })} /></label><div className="two-fields"><label>Έναρξη ησυχίας<input type="time" value={prefs.quietStart} onChange={(event) => event.target.value && onPrefs({ ...prefs, quietStart: event.target.value })} /></label><label>Λήξη ησυχίας<input type="time" value={prefs.quietEnd} onChange={(event) => event.target.value && onPrefs({ ...prefs, quietEnd: event.target.value })} /></label></div><button className="secondary-action" onClick={onRequestPermission} disabled={permission === "granted" || permission === "unsupported"}><Bell size={17} />{permission === "granted" ? "Οι ειδοποιήσεις είναι ενεργές" : "Άδεια browser notification"}</button><p className="data-note">Κατάσταση άδειας: {permissionLabel}{lastAlert ? ` · τελευταία ειδοποίηση ${formatAthens(lastAlert.at)} (δείκτης ${lastAlert.score})` : ""}</p></section><section className="panel"><span className="eyebrow">CURRENT EVALUATION</span><h2>{passes ? "Περνά το όριο δείκτη" : "Δεν περνά το όριο"}</h2><div className="alert-preview"><Bell size={20} /><div><strong>Παράδειγμα παραγόμενης ειδοποίησης</strong><p>{candidate ? `${alertBody(candidate)} Δείκτης ${candidate.score.total}/100 (${confidenceLabel(candidate.score.confidence).toLowerCase()} εμπιστοσύνη).` : "Δεν υπάρχει κατάλληλος στόχος τώρα."}</p></div></div><div className="warning-box"><AlertTriangle size={17} /><p><strong>Ο browser δεν είναι server.</strong> Όσο η εφαρμογή είναι ανοιχτή, ελέγχει ξανά κάθε 15 λεπτά και ειδοποιεί σύμφωνα με τους κανόνες, εκτός από τις ώρες ησυχίας. Με κλειστή εφαρμογή δεν γίνεται παρακολούθηση· αυτό απαιτεί server push και προγραμματισμένο worker.</p></div></section></div></div>;
 }
 
 function SettingsView({ observer, range, data, language, eumetsat, radarStatus, onObserver, onRange, onLanguage, onRefresh }: { observer: SavedLocation; range: { min: number; max: number }; data: OpportunityResponse | null; language: Language; eumetsat: EumetsatMetadata | null; radarStatus: DataStatus; onObserver: (value: SavedLocation) => void; onRange: (value: { min: number; max: number }) => void; onLanguage: (value: Language) => void; onRefresh: () => void }) {

@@ -24,3 +24,16 @@ export class TtlCache<V> {
     }
   }
 }
+
+/** Shares one pending promise per key, so concurrent cache misses make a single upstream call. */
+export class InFlight<V> {
+  private pending = new Map<string, Promise<V>>();
+
+  run(key: string, task: () => Promise<V>): Promise<V> {
+    const existing = this.pending.get(key);
+    if (existing) return existing;
+    const promise = task().finally(() => this.pending.delete(key));
+    this.pending.set(key, promise);
+    return promise;
+  }
+}

@@ -75,6 +75,8 @@ export interface ScoreBreakdown {
 
 /** Lightning that EUMETSAT MTG-LI observed at (or near) a target. */
 export interface ObservedLightning {
+  /** Id of the MTG-LI storm this lightning belongs to. */
+  stormId?: string;
   /** Start of the newest 5-minute MTG-LI frame that contains this storm. */
   observedAt: string;
   ageMinutes: number;
@@ -99,6 +101,8 @@ export interface LightningObservation {
   latestFrameAt: string | null;
   windowMinutes: number;
   clusters: LightningCluster[];
+  /** Observed storms inside the scan range (set per scan; clusters cover a wider box). */
+  inRangeCount?: number;
   message: string;
 }
 

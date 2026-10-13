@@ -15,7 +15,7 @@ import { altitudeEnvelope, destinationPoint, inverseGeodesic } from "@/lib/geode
 import { skyState } from "@/lib/astronomy";
 import { scoreOpportunity } from "@/lib/scoring";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
-import { TtlCache } from "@/lib/bounded-cache";
+import { InFlight, TtlCache } from "@/lib/bounded-cache";
 import { fetchNearestAviationWeather, unavailableAviation } from "@/lib/providers/aviation-weather";
 import { fetchMeteoAlarm, unavailableMeteoAlarm } from "@/lib/providers/meteoalarm";
 import { fetchLightningObservation } from "@/lib/providers/mtg-lightning";
@@ -80,10 +80,16 @@ interface ForecastBase {
   gridSize: number;
 }
 const forecastCache = new TtlCache<ForecastBase>(100);
-// Forecast hours this close to the newest MTG-LI frame are checked against the observation.
-const NOWCAST_WINDOW_MS = 60 * 60_000;
-// Lightning within this distance of a forecast cell is treated as the same storm.
-const SAME_STORM_KM = 100;
+const forecastInFlight = new InFlight<ForecastBase>();
+// Forecast hours from 60 min before to 30 min after the newest MTG-LI frame are judged
+// against it; storms may still develop in later hours.
+const NOWCAST_BEFORE_MS = 60 * 60_000;
+const NOWCAST_AFTER_MS = 30 * 60_000;
+// Lightning this close to a forecast cell, measured to the storm's edge, is the same storm.
+const NEAR_STORM_KM = 50;
+// Ranked targets returned, and how many places are kept for observed storms.
+const TARGET_LIMIT = 10;
+const RESERVED_OBSERVED = 3;
 // Model context for an observed storm comes from the nearest screening cell within this range.
 const MODEL_CONTEXT_KM = 150;
 // The lightning box extends past the scan radius so storms straddling its edge are whole.
@@ -278,6 +284,25 @@ function scoreInputForHour(
   };
 }
 
+/** The newest MTG-LI storms, used to judge forecast hours close to the observation time. */
+export interface LightningCheck {
+  frameMs: number;
+  clusters: LightningCluster[];
+  nowMs: number;
+}
+
+function lightningForHour(check: LightningCheck | null, coordinates: Coordinates, time: string): Pick<CandidateScoreInput, "lightning" | "observedLightning"> | null {
+  if (!check) return null;
+  const offset = Date.parse(utcIso(time)) - check.frameMs;
+  if (offset < -NOWCAST_BEFORE_MS || offset > NOWCAST_AFTER_MS) return null;
+  const nearest = check.clusters
+    .map((cluster) => ({ cluster, edgeKm: distanceKmBetween(coordinates, cluster.centroid) - cluster.radiusKm }))
+    .sort((a, b) => a.edgeKm - b.edgeKm)[0];
+  return nearest && nearest.edgeKm <= NEAR_STORM_KM
+    ? { lightning: "observed", observedLightning: observedDetail(nearest.cluster, check.nowMs) }
+    : { lightning: "not_detected", observedLightning: null };
+}
+
 export function buildCandidate(
   observer: Coordinates,
   target: WeatherPayload,
@@ -285,6 +310,7 @@ export function buildCandidate(
   aviation: AviationObservation,
   fetchedAt: string,
   nowMs = Date.now(),
+  lightningCheck: LightningCheck | null = null,
 ): StormCandidate | null {
   const hours = weatherHours(target);
   const windowStart = nowMs - 60 * 60_000;
@@ -305,7 +331,12 @@ export function buildCandidate(
       const precipitation = hour.precipitationMm ?? 0;
       const thunderCode = isThunderCode(hour.weatherCode);
       if (!thunderCode && !(cape >= 250 && precipitation >= 0.2) && cape < 600) return [];
-      const scoreInput = scoreInputForHour(observer, hour, thunderCode, lightningPotentialAt(target, hour.time), observerHours, aviation, geometry);
+      // Hours near the newest MTG-LI frame are confirmed or contradicted per hour, so a
+      // contradicted "now" cannot hide a later hour of the same cell.
+      const scoreInput: CandidateScoreInput = {
+        ...scoreInputForHour(observer, hour, thunderCode, lightningPotentialAt(target, hour.time), observerHours, aviation, geometry),
+        ...lightningForHour(lightningCheck, coordinates, hour.time),
+      };
       return [{ hour, scoreInput, score: scoreOpportunity({ ...scoreInput, terrain: "unknown" }), signal: stormSignal(hour) }];
     })
     .sort((a, b) => b.score.total - a.score.total || b.signal - a.signal)[0];
@@ -337,6 +368,7 @@ export function buildCandidate(
     score,
     scoreInput,
     source: "forecast",
+    observedLightning: scoreInput.observedLightning ?? null,
     provenance: {
       provider: "Open-Meteo",
       kind: "forecast",
@@ -354,6 +386,7 @@ export function buildCandidate(
 
 function observedDetail(cluster: LightningCluster, nowMs: number): ObservedLightning {
   return {
+    stormId: cluster.id,
     observedAt: cluster.observedAt,
     ageMinutes: Math.max(0, Math.round((nowMs - Date.parse(cluster.observedAt)) / 60_000)),
     areaKm2: cluster.areaKm2,
@@ -365,23 +398,22 @@ function observedDetail(cluster: LightningCluster, nowMs: number): ObservedLight
 
 const distanceKmBetween = (a: Coordinates, b: Coordinates) => inverseGeodesic(a, b).distanceM / 1000;
 
-export interface LightningMergeContext {
+export interface TargetContext {
   observerHours: WeatherHour[];
   aviation: AviationObservation;
-  payloads: WeatherPayload[];
   minimumKm: number;
   maximumKm: number;
   fetchedAt: string;
   nowMs?: number;
 }
 
-function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster, context: LightningMergeContext, nowMs: number): StormCandidate | null {
+function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster, payloads: WeatherPayload[], context: TargetContext, nowMs: number): StormCandidate | null {
   const coordinates: Coordinates = { latitude: cluster.centroid.latitude, longitude: cluster.centroid.longitude, elevationM: 0 };
   const geometry = inverseGeodesic(observer, coordinates);
   const distanceKm = geometry.distanceM / 1000;
   if (distanceKm < context.minimumKm || distanceKm > context.maximumKm) return null;
 
-  const nearest = context.payloads
+  const nearest = payloads
     .map((payload) => ({ payload, distanceKm: distanceKmBetween(coordinates, payload) }))
     .sort((a, b) => a.distanceKm - b.distanceKm)[0];
   const model = nearest && nearest.distanceKm <= MODEL_CONTEXT_KM ? nearest.payload : null;
@@ -431,38 +463,43 @@ function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster
   };
 }
 
-function withLightning(candidate: StormCandidate, lightning: CandidateScoreInput["lightning"], detail: ObservedLightning | null): StormCandidate {
-  const scoreInput = { ...candidate.scoreInput, lightning, observedLightning: detail };
-  return { ...candidate, scoreInput, observedLightning: detail, score: scoreOpportunity({ ...scoreInput, terrain: "unknown" }) };
+const byScore = (a: StormCandidate, b: StormCandidate) => b.score.total - a.score.total;
+
+/**
+ * All targets for one scan: forecast cells (hours near the newest MTG-LI frame confirmed
+ * or damped by it) plus every observed storm inside the scan range. A forecast cell whose
+ * chosen hour is confirmed by a storm that is itself a target is dropped as a duplicate.
+ */
+export function buildTargets(
+  observer: Coordinates,
+  payloads: WeatherPayload[],
+  observation: LightningObservation | null,
+  context: TargetContext,
+): StormCandidate[] {
+  const nowMs = context.nowMs ?? Date.now();
+  const usable = observation?.status === "available" && observation.latestFrameAt ? observation : null;
+  const check = usable ? { frameMs: Date.parse(usable.latestFrameAt!), clusters: usable.clusters, nowMs } : null;
+  const forecast = payloads
+    .map((payload) => buildCandidate(observer, payload, context.observerHours, context.aviation, context.fetchedAt, nowMs, check))
+    .filter((candidate): candidate is StormCandidate => candidate !== null);
+  if (!usable) return forecast.sort(byScore);
+  const observed = usable.clusters
+    .map((cluster) => buildObservedCandidate(observer, cluster, payloads, context, nowMs))
+    .filter((candidate): candidate is StormCandidate => candidate !== null);
+  const observedIds = new Set(observed.map((candidate) => candidate.id));
+  const kept = forecast.filter((candidate) => !observedIds.has(candidate.observedLightning?.stormId ?? ""));
+  return [...observed, ...kept].sort(byScore);
 }
 
 /**
- * Combines MTG-LI storms with forecast cells: every observed storm in range becomes a
- * target, forecast cells valid near the newest frame are confirmed by nearby lightning
- * (or replaced by the observed storm), and those with no lightning nearby are damped.
+ * The best `limit` targets, keeping up to `reservedObserved` places for observed storms:
+ * by day they are capped low but should stay visible as live context.
  */
-export function mergeLightningObservation(
-  observer: Coordinates,
-  forecastCandidates: StormCandidate[],
-  observation: LightningObservation | null,
-  context: LightningMergeContext,
-): StormCandidate[] {
-  if (!observation || observation.status !== "available" || !observation.latestFrameAt) return forecastCandidates;
-  const nowMs = context.nowMs ?? Date.now();
-  const frameMs = Date.parse(observation.latestFrameAt);
-  const observed = observation.clusters
-    .map((cluster) => buildObservedCandidate(observer, cluster, context, nowMs))
-    .filter((candidate): candidate is StormCandidate => candidate !== null);
-  const forecast = forecastCandidates.flatMap((candidate) => {
-    if (Math.abs(Date.parse(utcIso(candidate.forecastValidAt)) - frameMs) > NOWCAST_WINDOW_MS) return [candidate];
-    const nearest = observation.clusters
-      .map((cluster) => ({ cluster, distanceKm: distanceKmBetween(candidate.coordinates, cluster.centroid) }))
-      .sort((a, b) => a.distanceKm - b.distanceKm)[0];
-    if (!nearest || nearest.distanceKm > SAME_STORM_KM) return [withLightning(candidate, "not_detected", null)];
-    if (observed.some((target) => distanceKmBetween(target.coordinates, candidate.coordinates) <= SAME_STORM_KM)) return [];
-    return [withLightning(candidate, "observed", observedDetail(nearest.cluster, nowMs))];
-  });
-  return [...observed, ...forecast].sort((a, b) => b.score.total - a.score.total);
+export function selectTopCandidates(candidates: StormCandidate[], limit = TARGET_LIMIT, reservedObserved = RESERVED_OBSERVED) {
+  const sorted = [...candidates].sort(byScore);
+  const observed = sorted.filter((candidate) => candidate.source === "observed").slice(0, reservedObserved);
+  const rest = sorted.filter((candidate) => !observed.includes(candidate)).slice(0, Math.max(0, limit - observed.length));
+  return [...observed, ...rest].sort(byScore);
 }
 
 const serverOnlyLightning = (retrievedAt: string): LightningObservation => ({
@@ -473,7 +510,10 @@ async function loadForecastBase(observer: Coordinates, minimumKm: number, maximu
   const cacheKey = `${observer.latitude.toFixed(3)}:${observer.longitude.toFixed(3)}:${minimumKm}:${maximumKm}:${serverOnlySources}`;
   const cached = forecastCache.get(cacheKey);
   if (cached) return cached;
+  return forecastInFlight.run(cacheKey, () => fetchForecastBase(cacheKey, observer, minimumKm, maximumKm, serverOnlySources));
+}
 
+async function fetchForecastBase(cacheKey: string, observer: Coordinates, minimumKm: number, maximumKm: number, serverOnlySources: boolean): Promise<ForecastBase> {
   const grid = makeScreeningGrid(observer, minimumKm, maximumKm);
   const airParams = new URLSearchParams({
     latitude: observer.latitude.toString(),
@@ -523,7 +563,7 @@ export async function fetchOpportunities(
   maximumKm = 600,
   { serverOnlySources = true }: { serverOnlySources?: boolean } = {},
 ): Promise<OpportunityResponse> {
-  const [base, lightning] = await Promise.all([
+  const [base, rawLightning] = await Promise.all([
     loadForecastBase(observer, minimumKm, maximumKm, serverOnlySources),
     // EUMETView frames are decoded on the server; the browser fallback does not repeat that work.
     serverOnlySources
@@ -532,15 +572,15 @@ export async function fetchOpportunities(
   ]);
   const nowMs = Date.now();
   const { fetchedAt, observerForecast, airQuality, aviation, weatherAlerts, payloads, screeningFailures, gridSize } = base;
-  const forecastCandidates = payloads
-    .map((payload) => buildCandidate(observer, payload, observerForecast, aviation, fetchedAt, nowMs))
-    .filter((candidate): candidate is StormCandidate => candidate !== null);
-  const candidates = mergeLightningObservation(observer, forecastCandidates, lightning, {
-    observerHours: observerForecast, aviation, payloads, minimumKm, maximumKm, fetchedAt, nowMs,
-  })
-    .sort((a, b) => b.score.total - a.score.total)
-    .slice(0, 10);
+  const allTargets = buildTargets(observer, payloads, rawLightning, { observerHours: observerForecast, aviation, minimumKm, maximumKm, fetchedAt, nowMs });
+  const candidates = selectTopCandidates(allTargets);
   const observedCount = candidates.filter((candidate) => candidate.source === "observed").length;
+  // Ages are recomputed per response; the observation itself is cached for a few minutes.
+  const lightning: LightningObservation = {
+    ...rawLightning,
+    clusters: rawLightning.clusters.map((cluster) => ({ ...cluster, ageMinutes: Math.max(0, Math.round((nowMs - Date.parse(cluster.observedAt)) / 60_000)) })),
+    inRangeCount: allTargets.filter((candidate) => candidate.source === "observed").length,
+  };
 
   const xweatherConfigured = typeof process !== "undefined" && Boolean(process.env.XWEATHER_CLIENT_ID && process.env.XWEATHER_CLIENT_SECRET);
   const screeningStatus = screeningFailures === 0 ? "available" : payloads.length ? "stale" : "unavailable";

@@ -1,6 +1,6 @@
 import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import type { AviationObservation, LightningObservation, WeatherHour } from "@/lib/domain";
+import type { AviationObservation, LightningObservation, StormCandidate, WeatherHour } from "@/lib/domain";
 import { decodePng } from "@/lib/png";
 import {
   clusterLightningFrames,
@@ -9,7 +9,7 @@ import {
   lightningFrameSize,
   parseWmsTimeHeader,
 } from "@/lib/providers/mtg-lightning";
-import { buildCandidate, mergeLightningObservation } from "@/lib/providers/open-meteo";
+import { buildTargets, selectTopCandidates } from "@/lib/providers/open-meteo";
 import { scoreOpportunity } from "@/lib/scoring";
 
 // --- Minimal PNG encoder for the decoder tests (CRCs are not checked by the decoder). ---
@@ -138,6 +138,20 @@ describe("MTG-LI accumulated flash area", () => {
   });
 });
 
+describe("storm-sized lightning clusters", () => {
+  it("splits a long squall line instead of chaining it into one huge storm", () => {
+    const bounds = { west: 20, south: 35, east: 24, north: 39 };
+    const image = { width: 100, height: 100, data: new Uint8Array(100 * 100 * 4) };
+    for (let x = 0; x < 100; x += 1) image.data.set([254, 205, 105, 255], (50 * 100 + x) * 4);
+    const clusters = clusterLightningFrames([{ time: "2026-10-12T21:10:00.000Z", image }], bounds, Date.parse("2026-10-12T21:25:00Z"));
+    // The line is ~355 km long; storms are limited to ~75 km around their most active cell.
+    expect(clusters.length).toBeGreaterThanOrEqual(3);
+    for (const cluster of clusters) expect(cluster.radiusKm).toBeLessThanOrEqual(95);
+    const totalArea = clusters.reduce((sum, cluster) => sum + cluster.areaKm2, 0);
+    expect(totalArea).toBeGreaterThan(1_400);
+  });
+});
+
 describe("observed lightning in the opportunity score", () => {
   const base = {
     capeJkg: 900, precipitationMm: 1, thunderCode: true, observerCloudPercent: 0, observerHighCloudPercent: 0,
@@ -176,7 +190,7 @@ describe("observed lightning in the opportunity score", () => {
   });
 });
 
-describe("merging MTG-LI storms with forecast targets", () => {
+describe("forecast and MTG-LI targets together", () => {
   const sparta = { latitude: 37.075, longitude: 22.43, elevationM: 210 };
   const start = Date.parse("2026-07-15T00:00:00Z");
   const hourIso = (index: number) => new Date(start + index * 3_600_000).toISOString().slice(0, 16);
@@ -200,22 +214,19 @@ describe("merging MTG-LI storms with forecast targets", () => {
   }));
   const aviation = { status: "unavailable", observedAt: null, distanceKm: null, cloudCoverPercent: null, visibilityM: null } as unknown as AviationObservation;
   const nowMs = Date.parse("2026-07-15T22:25:00Z");
-  const cluster = (latitude: number, longitude: number) => ({
-    id: `mtg-${latitude}-${longitude}`, centroid: { latitude, longitude }, radiusKm: 30,
+  const cluster = (latitude: number, longitude: number, radiusKm = 30) => ({
+    id: `mtg-${latitude}-${longitude}`, centroid: { latitude, longitude }, radiusKm,
     observedAt: "2026-07-15T22:10:00.000Z", ageMinutes: 15, areaKm2: 5_000, maxFlashesPer5Min: 15, frames: 3, windowMinutes: 15,
   });
   const observation = (clusters: ReturnType<typeof cluster>[], status: LightningObservation["status"] = "available"): LightningObservation => ({
     status, retrievedAt: "2026-07-15T22:24:00.000Z", latestFrameAt: "2026-07-15T22:10:00.000Z", windowMinutes: 15, clusters, message: "",
   });
-  const context = (payloads: ReturnType<typeof payload>[]) => ({ observerHours, aviation, payloads, minimumKm: 200, maximumKm: 600, fetchedAt: "2026-07-15T22:25:00.000Z", nowMs });
+  const context = { observerHours, aviation, minimumKm: 200, maximumKm: 600, fetchedAt: "2026-07-15T22:25:00.000Z", nowMs };
 
   it("turns a storm MTG-LI sees into an observed target and drops the duplicate forecast cell", () => {
-    const target = payload({ 22: 900 });
-    const forecast = buildCandidate(sparta, target, observerHours, aviation, "2026-07-15T22:25:00.000Z", nowMs)!;
-    expect(forecast.forecastValidAt).toBe("2026-07-15T22:00Z");
-    const merged = mergeLightningObservation(sparta, [forecast], observation([cluster(34.6, 24.4)]), context([target]));
-    expect(merged).toHaveLength(1);
-    const [observed] = merged;
+    const targets = buildTargets(sparta, [payload({ 22: 900 })], observation([cluster(34.6, 24.4)]), context);
+    expect(targets).toHaveLength(1);
+    const [observed] = targets;
     expect(observed.source).toBe("observed");
     expect(observed.scoreInput.lightning).toBe("observed");
     expect(observed.capeJkg).toBe(900);
@@ -224,25 +235,52 @@ describe("merging MTG-LI storms with forecast targets", () => {
     expect(observed.provenance.kind).toBe("observation");
   });
 
+  it("confirms a forecast cell that sits near the edge of a large storm", () => {
+    // Storm centroid ~150 km from the cell but 130 km wide: lightning reaches the cell.
+    const storm = cluster(35.8, 24.6, 130);
+    const targets = buildTargets(sparta, [payload({ 22: 900 })], observation([storm]), { ...context, minimumKm: 250 });
+    const forecast = targets.find((candidate) => candidate.source === "forecast")!;
+    expect(forecast.scoreInput.lightning).toBe("observed");
+    expect(forecast.observedLightning?.stormId).toBe(storm.id);
+  });
+
   it("damps a near-term forecast cell with no lightning nearby", () => {
-    const target = payload({ 22: 900 });
-    const forecast = buildCandidate(sparta, target, observerHours, aviation, "2026-07-15T22:25:00.000Z", nowMs)!;
-    const merged = mergeLightningObservation(sparta, [forecast], observation([cluster(41.5, 26.5)]), context([target]));
-    const damped = merged.find((candidate) => candidate.source === "forecast")!;
+    const [damped] = buildTargets(sparta, [payload({ 22: 900 })], observation([cluster(41.5, 26.5)]), context).filter((candidate) => candidate.source === "forecast");
+    expect(damped.forecastValidAt).toBe("2026-07-15T22:00Z");
     expect(damped.scoreInput.lightning).toBe("not_detected");
     expect(damped.score.activity).toBeLessThanOrEqual(12);
   });
 
-  it("leaves later forecast hours and unavailable observations untouched", () => {
-    const target = payload({ 40: 900 });
-    const forecast = buildCandidate(sparta, target, observerHours, aviation, "2026-07-15T22:25:00.000Z", nowMs)!;
-    expect(mergeLightningObservation(sparta, [forecast], observation([]), context([target]))[0].scoreInput.lightning).toBe("not_configured");
-    const unavailable = mergeLightningObservation(sparta, [forecast], observation([cluster(34.6, 24.4)], "unavailable"), context([target]));
-    expect(unavailable).toEqual([forecast]);
+  it("keeps a later night hour when the current hour is contradicted", () => {
+    const [forecast] = buildTargets(sparta, [payload({ 22: 900, 24: 900 })], observation([]), context);
+    expect(forecast.forecastValidAt).toBe("2026-07-16T00:00Z");
+    expect(forecast.scoreInput.lightning).toBe("not_configured");
   });
 
-  it("ignores storms outside the scan range", () => {
-    const merged = mergeLightningObservation(sparta, [], observation([cluster(37.5, 22.6)]), context([]));
-    expect(merged).toHaveLength(0);
+  it("does not judge hours more than 30 minutes after the newest frame", () => {
+    const [forecast] = buildTargets(sparta, [payload({ 23: 900 })], observation([]), context);
+    expect(forecast.forecastValidAt).toBe("2026-07-15T23:00Z");
+    expect(forecast.scoreInput.lightning).toBe("not_configured");
+  });
+
+  it("ignores unavailable observations and storms outside the scan range", () => {
+    const withoutLightning = buildTargets(sparta, [payload({ 22: 900 })], null, context);
+    expect(buildTargets(sparta, [payload({ 22: 900 })], observation([cluster(34.6, 24.4)], "unavailable"), context)).toEqual(withoutLightning);
+    expect(buildTargets(sparta, [], observation([cluster(37.5, 22.6)]), context)).toHaveLength(0);
+  });
+});
+
+describe("ranked target list", () => {
+  const target = (id: string, source: "forecast" | "observed", total: number) => ({ id, source, score: { total } }) as unknown as StormCandidate;
+  it("keeps the best observed storms even when forecasts outrank them", () => {
+    const forecasts = Array.from({ length: 12 }, (_, index) => target(`f${index}`, "forecast", 60 - index));
+    const observed = [target("o1", "observed", 29), target("o2", "observed", 25)];
+    const ranked = selectTopCandidates([...forecasts, ...observed], 10, 3);
+    expect(ranked).toHaveLength(10);
+    expect(ranked.map((candidate) => candidate.id)).toEqual(["f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "o1", "o2"]);
+  });
+  it("does not pad when observed storms already rank", () => {
+    const ranked = selectTopCandidates([target("o1", "observed", 80), target("f1", "forecast", 50)], 10, 3);
+    expect(ranked.map((candidate) => candidate.id)).toEqual(["o1", "f1"]);
   });
 });

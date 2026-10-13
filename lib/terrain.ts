@@ -16,3 +16,13 @@ export function terrainVisibility(profile: TerrainProfile | null, envelope: Poin
   };
 }
 
+
+/**
+ * Terrain profiles are requested per whole degree: a 0.5° offset moves the profile by
+ * ~1 km at 120 km, while a moving storm would otherwise spend the shared DEM quota on
+ * every refresh.
+ */
+export function terrainBearingKey(bearingDeg: number) {
+  const rounded = Math.round(bearingDeg) % 360;
+  return rounded < 0 ? rounded + 360 : rounded;
+}

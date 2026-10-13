@@ -3,7 +3,11 @@ import { z } from "zod";
 import { cameraPointing } from "@/lib/orientation";
 import { parseNumericDraft } from "@/lib/number-input";
 import { numberParam, optionalNumberParam } from "@/lib/api-params";
-import { TtlCache } from "@/lib/bounded-cache";
+import { InFlight, TtlCache } from "@/lib/bounded-cache";
+import { terrainBearingKey } from "@/lib/terrain";
+import { followSelection } from "@/lib/selection";
+import { createId } from "@/lib/utils";
+import type { StormCandidate } from "@/lib/domain";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isAlertPrefs, isLensList, isLocationList, isSavedLocation, isSearchRange } from "@/lib/persisted-validators";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
@@ -158,5 +162,61 @@ describe("provider fetch retries", () => {
     const started = Date.now();
     await expect(fetchJsonWithRetry("https://example.test", { retries: 5, timeoutMs: 5_000, deadlineMs: 120 })).rejects.toThrow();
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe("shared in-flight requests", () => {
+  it("runs one task for concurrent callers and a new one after it settles", async () => {
+    const inFlight = new InFlight<number>();
+    let calls = 0;
+    const task = () => new Promise<number>((resolve) => { calls += 1; setTimeout(() => resolve(calls), 5); });
+    const [a, b] = await Promise.all([inFlight.run("k", task), inFlight.run("k", task)]);
+    expect([a, b, calls]).toEqual([1, 1, 1]);
+    expect(await inFlight.run("k", task)).toBe(2);
+  });
+  it("releases the key when the task fails", async () => {
+    const inFlight = new InFlight<number>();
+    await expect(inFlight.run("k", () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
+    expect(await inFlight.run("k", () => Promise.resolve(7))).toBe(7);
+  });
+});
+
+describe("terrain bearing quantisation", () => {
+  it("rounds to whole degrees within 0–359", () => {
+    expect(terrainBearingKey(12.4)).toBe(12);
+    expect(terrainBearingKey(12.6)).toBe(13);
+    expect(terrainBearingKey(359.6)).toBe(0);
+    expect(terrainBearingKey(360)).toBe(0);
+  });
+});
+
+describe("selection across refreshes", () => {
+  const target = (id: string, source: StormCandidate["source"], latitude: number, longitude: number) =>
+    ({ id, source, coordinates: { latitude, longitude } }) as StormCandidate;
+  const next = [target("forecast-a", "forecast", 35, 25), target("mtg-36.10-20.02", "observed", 36.1, 20.02)];
+  it("keeps the same id when it still exists", () => {
+    expect(followSelection(target("forecast-a", "forecast", 35, 25), next)).toBe("forecast-a");
+  });
+  it("follows a moving observed storm to its new id", () => {
+    expect(followSelection(target("mtg-36.00-20.00", "observed", 36, 20), next)).toBe("mtg-36.10-20.02");
+  });
+  it("falls back to the best target when nothing similar is near", () => {
+    expect(followSelection(target("mtg-40.00-15.00", "observed", 40, 15), next)).toBe("forecast-a");
+    expect(followSelection(null, next)).toBe("forecast-a");
+    expect(followSelection(null, [])).toBeNull();
+  });
+});
+
+describe("id generation", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("uses crypto.randomUUID when available", () => {
+    expect(createId()).toMatch(/^[0-9a-f-]{36}$/);
+  });
+  it("still works where randomUUID is missing (plain-HTTP testing, older browsers)", () => {
+    vi.stubGlobal("crypto", { getRandomValues: (array: Uint8Array) => array.map((_, index) => index * 17) });
+    expect(createId()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    vi.stubGlobal("crypto", undefined);
+    const ids = new Set(Array.from({ length: 50 }, () => createId()));
+    expect(ids.size).toBe(50);
   });
 });
