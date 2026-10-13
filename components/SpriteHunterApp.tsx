@@ -57,7 +57,7 @@ import { skyState } from "@/lib/astronomy";
 import { terrainBearingKey, terrainVisibility } from "@/lib/terrain";
 import { followSelection } from "@/lib/selection";
 import { createId } from "@/lib/utils";
-import { formatAthens } from "@/lib/time";
+import { formatAthens, formatAthensTime } from "@/lib/time";
 import { magneticDeclination, normalizeBearing } from "@/lib/wmm";
 import { cameraPointing } from "@/lib/orientation";
 import { parseNumericDraft } from "@/lib/number-input";
@@ -121,6 +121,7 @@ const strings = {
   el: {
     subtitle: "Παρατηρητήριο Ανώτερης Ατμόσφαιρας",
     refresh: "Ανανέωση δεδομένων",
+    updated: "Ενημερώθηκε",
     noOpportunity: "Δεν εντοπίστηκε κατάλληλη ευκαιρία τώρα",
     insufficient: "Ανεπαρκή δεδομένα",
     possible: "Πιθανή ευκαιρία",
@@ -132,6 +133,7 @@ const strings = {
   en: {
     subtitle: "Upper Atmosphere Observatory",
     refresh: "Refresh data",
+    updated: "Updated",
     noOpportunity: "No suitable opportunity currently detected",
     insufficient: "Insufficient data",
     possible: "Possible opportunity",
@@ -351,6 +353,9 @@ export default function SpriteHunterApp() {
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
   const requestRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const loadedOnceRef = useRef(false);
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
+  const [refreshConfirmed, setRefreshConfirmed] = useState(false);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The target shown before a refresh, so a moving storm (new id) stays selected.
   const selectedRef = useRef<StormCandidate | null>(null);
   const mobileNavRef = useRef<HTMLElement>(null);
@@ -378,7 +383,8 @@ export default function SpriteHunterApp() {
     : null;
   const currentSky = selected ? skyState(new Date(selected.forecastValidAt), observer.latitude, observer.longitude, selected.bearingDeg) : null;
 
-  const refresh = useCallback(async () => {
+  // Resolves true once this scan's data is on screen.
+  const refresh = useCallback(async (): Promise<boolean> => {
     // Only the newest scan may update the screen; older in-flight requests are aborted or ignored.
     const id = requestRef.current.id + 1;
     requestRef.current.controller?.abort();
@@ -393,9 +399,10 @@ export default function SpriteHunterApp() {
       });
       let response: Response | null = null;
       try {
-        response = await fetch(`/api/opportunities?${params}`, { signal: controller.signal });
+        // no-store also skips responses that older versions let the browser cache for minutes.
+        response = await fetch(`/api/opportunities?${params}`, { signal: controller.signal, cache: "no-store" });
       } catch {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) return false;
       }
       let payload: OpportunityResponse;
       if (response && response.status < 500) {
@@ -423,13 +430,16 @@ export default function SpriteHunterApp() {
           ],
         };
       }
-      if (!isCurrent()) return;
+      if (!isCurrent()) return false;
       loadedOnceRef.current = true;
       setData(payload);
+      setCheckedAt(Date.now());
       setSelectedId(followSelection(selectedRef.current, payload.candidates));
+      return true;
     } catch (refreshError) {
-      if (!isCurrent() || controller.signal.aborted) return;
+      if (!isCurrent() || controller.signal.aborted) return false;
       setError(refreshError instanceof Error ? refreshError.message : "Άγνωστο σφάλμα δεδομένων.");
+      return false;
     } finally {
       if (isCurrent()) setLoading(false);
     }
@@ -447,6 +457,15 @@ export default function SpriteHunterApp() {
     const timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, AUTO_REFRESH_MS);
     return () => clearInterval(timer);
   }, [refresh, hydrated]);
+  // The forecast is cached on the server, so a refresh can return the same targets in a
+  // fraction of a second; confirm it briefly so the button does not look dead.
+  const manualRefresh = async () => {
+    if (!(await refresh())) return;
+    setRefreshConfirmed(true);
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    confirmTimerRef.current = setTimeout(() => setRefreshConfirmed(false), 2_500);
+  };
+  useEffect(() => () => { if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current); }, []);
   useEffect(() => {
     fetch("/api/radar").then(async (response) => {
       if (!response.ok) throw new Error("Radar unavailable");
@@ -524,6 +543,8 @@ export default function SpriteHunterApp() {
     if (typeof Notification === "undefined") return;
     setNotificationPermission(await Notification.requestPermission());
   };
+  const checkedLabel = checkedAt ? `${t.updated} ${formatAthensTime(new Date(checkedAt), language)}` : null;
+  const confirmed = refreshConfirmed && !loading;
 
   return (
     <div className="app-shell">
@@ -554,7 +575,10 @@ export default function SpriteHunterApp() {
           <div className="top-actions">
             <PwaInstallButton />
             <button className="icon-button" title="Αλλαγή γλώσσας" aria-label="Αλλαγή γλώσσας" onClick={() => setLanguage(language === "el" ? "en" : "el")}><Languages size={18} /><span>{language.toUpperCase()}</span></button>
-            <button className="refresh-button" onClick={refresh} disabled={loading} aria-label={t.refresh}><RefreshCw size={17} className={loading ? "spin" : ""} /><span>{t.refresh}</span></button>
+            <button className={`refresh-button${confirmed ? " confirmed" : ""}`} onClick={manualRefresh} disabled={loading} aria-label={confirmed && checkedLabel ? checkedLabel : t.refresh} title={checkedLabel ?? undefined}>
+              {confirmed ? <Check size={17} /> : <RefreshCw size={17} className={loading ? "spin" : ""} />}
+              <span>{confirmed && checkedLabel ? checkedLabel : t.refresh}</span>
+            </button>
           </div>
         </header>
 
@@ -569,7 +593,7 @@ export default function SpriteHunterApp() {
           {screen === "camera" && <CameraView candidate={selected} lenses={lenses} selectedLens={selectedLens} fov={fov} framing={framing} orientation={orientation} sky={currentSky} onSelect={setSelectedLensId} onLenses={setLenses} onOrientation={setOrientation} />}
           {screen === "logbook" && <LogbookView logs={logs} candidate={selected} lens={selectedLens} onLogs={setLogs} />}
           {screen === "alerts" && <AlertsView candidate={topCandidate} prefs={alertPrefs} lastAlert={lastAlert} permission={notificationPermission} onPrefs={setAlertPrefs} onRequestPermission={requestNotifications} />}
-          {screen === "settings" && <SettingsView observer={observer} range={range} data={data} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onObserver={setObserver} onRange={setRange} onLanguage={setLanguage} onRefresh={refresh} />}
+          {screen === "settings" && <SettingsView observer={observer} range={range} data={data} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onObserver={setObserver} onRange={setRange} onLanguage={setLanguage} onRefresh={manualRefresh} />}
         </div>
       </main>
 

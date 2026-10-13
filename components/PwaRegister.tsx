@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { CheckCircle2, Download, Share2, Smartphone, X } from "lucide-react";
 
 interface BeforeInstallPromptEvent extends Event {
@@ -102,7 +103,9 @@ export function PwaInstallButton() {
         <span>{installing ? "Εγκατάσταση…" : "Εγκατάσταση"}</span>
       </button>
 
-      {showHelp && (
+      {/* Rendered into <body>: the top bar's backdrop-filter makes it the containing block for
+          fixed children, which squeezed the overlay into the bar and pushed the dialog off-screen. */}
+      {showHelp && createPortal(
         <div className="pwa-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowHelp(false); }}>
           <section className="pwa-dialog" role="dialog" aria-modal="true" aria-labelledby="pwa-dialog-title">
             <button className="pwa-dialog-close" type="button" onClick={() => setShowHelp(false)} aria-label="Κλείσιμο"><X size={18} /></button>
@@ -125,7 +128,8 @@ export function PwaInstallButton() {
             )}
             <p>Η εφαρμογή ανοίγει σε αυτόνομο παράθυρο. Το βασικό κέλυφος αποθηκεύεται για offline εκκίνηση, αλλά οι ζωντανοί χάρτες και τα μετεωρολογικά δεδομένα χρειάζονται σύνδεση.</p>
           </section>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

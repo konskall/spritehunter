@@ -32,7 +32,9 @@ export async function GET(request: Request) {
       parsed.data.minKm,
       parsed.data.maxKm,
     );
-    return NextResponse.json(data, { headers: { "Cache-Control": "public, max-age=300, stale-while-revalidate=600" } });
+    // The server already caches forecasts (15 min) and lightning (4 min). A browser cache on top
+    // served "Refresh data" from disk for up to 15 minutes and hid new lightning frames.
+    return NextResponse.json(data, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Forecast provider failed", status: "unavailable", checkedAt: new Date().toISOString() },

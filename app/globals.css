@@ -103,6 +103,7 @@ button, a, label, select, [role="button"] { touch-action: manipulation; }
 .primary-action.full { width: 100%; }
 .primary-action:disabled, .secondary-action:disabled { opacity: .4; cursor: not-allowed; }
 .refresh-button:hover, .secondary-action:hover, .icon-button:hover { background: #182b3b; }
+.refresh-button.confirmed { border-color: rgba(125,228,202,.5); color: var(--mint); }
 .primary-action:hover:not(:disabled) { filter: brightness(1.08); }
 .spin { animation: spin 1.2s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -477,7 +478,7 @@ input[type="range"] { padding: 0; accent-color: var(--red); }
   .refresh-button { width: 39px; padding: 0; }
   .mobile-nav { position: fixed; z-index: 50; left: 0; right: 0; bottom: 0; height: calc(70px + env(safe-area-inset-bottom)); padding: 7px max(8px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(8px, env(safe-area-inset-left)); display: flex; overflow-x: auto; overscroll-behavior-x: contain; gap: 3px; background: rgba(5,13,22,.96); border-top: 1px solid var(--line); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 28px), transparent 100%); mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 28px), transparent 100%); }
   .mobile-nav::-webkit-scrollbar { display: none; }
-  .mobile-nav button { min-width: 78px; flex: 1; border: 0; border-radius: 8px; background: transparent; color: var(--subtle); display: grid; place-content: center; gap: 3px; font-size: 10px; white-space: nowrap; cursor: pointer; }
+  .mobile-nav button { min-width: 78px; flex: 1; border: 0; border-radius: 8px; background: transparent; color: var(--subtle); display: grid; place-content: center; justify-items: center; gap: 3px; font-size: 10px; white-space: nowrap; cursor: pointer; }
   .mobile-nav button.active { color: var(--red-soft); background: rgba(240,67,98,.08); }
   input, select, textarea { font-size: 16px; }
   .map-controls button { width: 42px; height: 42px; }

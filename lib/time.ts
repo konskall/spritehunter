@@ -8,6 +8,13 @@ export function formatAthens(iso: string | Date, language: "el" | "en" = "el") {
   }).format(typeof iso === "string" ? new Date(iso) : iso);
 }
 
+export function formatAthensTime(iso: string | Date, language: "el" | "en" = "el") {
+  return new Intl.DateTimeFormat(language === "el" ? "el-GR" : "en-GB", {
+    timeZone: ATHENS_TIME_ZONE,
+    timeStyle: "short",
+  }).format(typeof iso === "string" ? new Date(iso) : iso);
+}
+
 export function athensUtcOffsetMinutes(date: Date) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: ATHENS_TIME_ZONE,
