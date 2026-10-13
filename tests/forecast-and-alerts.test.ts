@@ -36,7 +36,7 @@ function observerHours(cloud: number, high: number, visibility: number): Weather
 function metar(overrides: Partial<AviationObservation>): AviationObservation {
   return {
     status: "available", stationId: "LGKL", stationName: "Kalamata", distanceKm: 36, observedAt: "2026-07-15T22:00:00.000Z",
-    retrievedAt: "2026-07-15T22:05:00.000Z", visibilityM: 10_000, cloudCoverPercent: 0, cloudSummary: { el: "CAVOK", en: "CAVOK" },
+    retrievedAt: "2026-07-15T22:05:00.000Z", visibilityM: 10_000, visibilityAtLeast: false, cloudCoverPercent: 0, cloudSummary: { el: "CAVOK", en: "CAVOK" },
     windDirectionDeg: 0, windSpeedKmh: 0, weather: null, flightCategory: "VFR", rawMetar: "METAR LGKL 152200Z CAVOK",
     rawTaf: null, tafValidFrom: null, tafValidTo: null, message: { el: "", en: "" }, ...overrides,
   };
@@ -66,6 +66,13 @@ describe("forecast candidate selection", () => {
     const payload = targetPayload({ 22: { cape: 900, precipitation: 1, code: 95 } });
     const candidate = buildCandidate(sparta, payload, observerHours(10, 10, 30_000), metar({ cloudCoverPercent: null, visibilityM: null }), "2026-07-15T00:00:00Z", start);
     // 20·(1 − 0.10) + 10·(30 000/30 000) = 28.
+    expect(candidate!.score.atmosphere).toBe(28);
+  });
+
+  it("treats a METAR '10 km or more' as a minimum, not a cap on a clearer forecast", () => {
+    const payload = targetPayload({ 22: { cape: 900, precipitation: 1, code: 95 } });
+    const candidate = buildCandidate(sparta, payload, observerHours(10, 10, 30_000), metar({ visibilityAtLeast: true }), "2026-07-15T00:00:00Z", start);
+    // Forecast 30 km stands: 20·(1 − 0.10) + 10 = 28, not 20·0.9 + 10·(10 000/30 000) ≈ 21.
     expect(candidate!.score.atmosphere).toBe(28);
   });
 

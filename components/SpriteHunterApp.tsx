@@ -67,6 +67,7 @@ import { evaluateAlert, type AlertPreferences } from "@/lib/notifications";
 import { isAlertPrefs, isArray, isLanguage, isLastAlert, isLensList, isLocationList, isOrientation, isSavedLocation, isSearchRange, isString } from "@/lib/persisted-validators";
 import { PwaInstallButton } from "@/components/PwaRegister";
 import { tx, type Language, type Localized } from "@/lib/i18n";
+import { APP_VERSION } from "@/lib/version";
 
 const StormMap = dynamic(() => import("@/components/StormMap"), { ssr: false });
 
@@ -137,6 +138,7 @@ const DEFAULT_ALERT_PREFS: AlertPreferences = { minimumScore: 60, confidence: "m
 // Without observed lightning the score is capped at 69; only MTG-LI storms can go higher.
 const MAX_FORECAST_SCORE = 69;
 const AUTO_REFRESH_MS = 15 * 60_000;
+const CREATOR_URL = "https://www.linkedin.com/in/konstantinos-kalliakoudis-902b90103/";
 const LOCATION_DEBOUNCE_MS = 700;
 
 function safeRead<T>(key: string, fallback: T, validate?: (value: unknown) => value is T): T {
@@ -257,7 +259,8 @@ function lightningLine(candidate: StormCandidate, language: Language) {
 }
 
 function targetTitle(candidate: StormCandidate, language: Language) {
-  const direction = directionLabel(candidate.bearingDeg, language);
+  // With the distance, two storms in the same direction get different titles.
+  const direction = `${directionLabel(candidate.bearingDeg, language)} · ${Math.round(candidate.distanceKm)} km`;
   if (candidate.source === "observed") return L(language, `Παρατηρημένη καταιγίδα προς ${direction}`, `Observed storm to the ${direction}`);
   return candidate.scoreInput.lightning === "observed"
     ? L(language, `Επιβεβαιωμένη κυψέλη προς ${direction}`, `Confirmed cell to the ${direction}`)
@@ -373,8 +376,10 @@ export default function SpriteHunterApp() {
   const [data, setData] = useState<OpportunityResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Localized | null>(null);
+  // Null until the user picks a target; until then the best target is shown.
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [terrain, setTerrain] = useState<TerrainProfile | null>(null);
+  // DEM horizons per whole-degree bearing, tagged with the site they were computed for.
+  const [terrainState, setTerrainState] = useState<{ site: string; profiles: Map<number, TerrainProfile> } | null>(null);
   const [terrainLoading, setTerrainLoading] = useState(false);
   const [radar, setRadar] = useState<RadarMetadata | null>(null);
   const [radarStatus, setRadarStatus] = useState<DataStatus>("stale");
@@ -399,19 +404,21 @@ export default function SpriteHunterApp() {
   const hydrated = observerHydrated && rangeHydrated;
   const t = (el: string, en: string) => L(language, el, en);
 
-  const rawSelected = data?.candidates.find((candidate) => candidate.id === selectedId) ?? data?.candidates[0] ?? null;
-  useEffect(() => { selectedRef.current = rawSelected; }, [rawSelected]);
-  // Once the DEM line of sight for the selected bearing is known, re-score that target so
-  // the terrain component and confidence reflect the verified horizon everywhere it is shown.
-  const selected = useMemo(() => {
-    if (!rawSelected?.scoreInput || !terrain || terrain.bearingDeg !== terrainBearingKey(rawSelected.bearingDeg)) return rawSelected;
-    const visibility = terrainVisibility(terrain, rawSelected.pointing);
-    return visibility.status === "unknown" ? rawSelected : { ...rawSelected, score: rescoreWithTerrain(rawSelected.scoreInput, visibility.status) };
-  }, [rawSelected, terrain]);
-  const candidates = useMemo(
-    () => (data?.candidates ?? []).map((candidate) => (selected && candidate.id === selected.id ? selected : candidate)),
-    [data, selected],
-  );
+  const terrainSite = `${observer.latitude}:${observer.longitude}:${observer.cameraHeightM}`;
+  const terrainProfiles = terrainState?.site === terrainSite ? terrainState.profiles : null;
+  // Every target is re-scored with its own DEM line of sight once known and ranked again,
+  // so a target's score does not depend on which target is selected.
+  const candidates = useMemo(() => {
+    const list = data?.candidates ?? [];
+    if (!terrainProfiles) return list;
+    return list.map((candidate) => {
+      const visibility = terrainVisibility(terrainProfiles.get(terrainBearingKey(candidate.bearingDeg)) ?? null, candidate.pointing);
+      return visibility.status === "unknown" ? candidate : { ...candidate, score: rescoreWithTerrain(candidate.scoreInput, visibility.status) };
+    }).sort((a, b) => b.score.total - a.score.total);
+  }, [data, terrainProfiles]);
+  const selected = candidates.find((candidate) => candidate.id === selectedId) ?? candidates[0] ?? null;
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
+  const terrain = selected ? terrainProfiles?.get(terrainBearingKey(selected.bearingDeg)) ?? null : null;
   const selectedLens = lenses.find((lens) => lens.id === selectedLensId) ?? lenses[0];
   const fov = fieldOfView(CANON_750D, selectedLens.focalLengthMm, orientation);
   const uncertaintyAngle = selected ? (Math.atan2(selected.uncertaintyKm, selected.distanceKm) * 180) / Math.PI * 2 : 0;
@@ -474,7 +481,8 @@ export default function SpriteHunterApp() {
       loadedOnceRef.current = true;
       setData(payload);
       setCheckedAt(Date.now());
-      setSelectedId(followSelection(selectedRef.current, payload.candidates));
+      // Follow the user's pick across refreshes; without one, keep showing the best target.
+      setSelectedId((current) => (current == null ? null : followSelection(selectedRef.current, payload.candidates)));
       return true;
     } catch (refreshError) {
       if (!isCurrent() || controller.signal.aborted) return false;
@@ -539,25 +547,37 @@ export default function SpriteHunterApp() {
       .finally(() => { if (!controller.signal.aborted) setAuroraLoading(false); });
     return () => controller.abort();
   }, [auroraActive, hydrated, observer.latitude, observer.longitude]);
-  const terrainBearing = rawSelected ? terrainBearingKey(rawSelected.bearingDeg) : null;
+  // One DEM request covers the bearings of all listed targets; the server caches each for a week.
+  const terrainBearings = useMemo(
+    () => Array.from(new Set((data?.candidates ?? []).map((candidate) => terrainBearingKey(candidate.bearingDeg)))).sort((a, b) => a - b).join(","),
+    [data],
+  );
   useEffect(() => {
-    if (terrainBearing == null || !hydrated) { setTerrain(null); return; }
+    if (!terrainBearings || !hydrated) return;
     const controller = new AbortController();
+    const site = `${observer.latitude}:${observer.longitude}:${observer.cameraHeightM}`;
     setTerrainLoading(true);
-    const params = new URLSearchParams({ lat: observer.latitude.toString(), lon: observer.longitude.toString(), bearing: terrainBearing.toString(), cameraHeight: observer.cameraHeightM.toString() });
+    const params = new URLSearchParams({ lat: observer.latitude.toString(), lon: observer.longitude.toString(), bearings: terrainBearings, cameraHeight: observer.cameraHeightM.toString() });
     fetch(`/api/terrain?${params}`, { signal: controller.signal })
       .then(async (response) => {
-        const payload = (await response.json()) as TerrainProfile;
-        setTerrain(response.ok ? payload : null);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = (await response.json()) as { profiles: TerrainProfile[] };
+        setTerrainState((current) => {
+          // A failed bearing never replaces a profile that was already verified.
+          const profiles = new Map(current?.site === site ? current.profiles : []);
+          for (const profile of payload.profiles) {
+            if (profile.status === "available" || profiles.get(profile.bearingDeg)?.status !== "available") profiles.set(profile.bearingDeg, profile);
+          }
+          return { site, profiles };
+        });
       })
-      .catch((terrainError) => {
-        if ((terrainError as Error).name !== "AbortError") setTerrain(null);
-      })
+      // Without a DEM answer the targets stay marked as unverified.
+      .catch(() => {})
       .finally(() => { if (!controller.signal.aborted) setTerrainLoading(false); });
     return () => controller.abort();
-  }, [terrainBearing, hydrated, observer.latitude, observer.longitude, observer.cameraHeightM]);
+  }, [terrainBearings, hydrated, observer.latitude, observer.longitude, observer.cameraHeightM]);
   // In-app watch: notify when the best target passes the user's rules.
-  const topCandidate = data?.candidates[0] ?? null;
+  const topCandidate = candidates[0] ?? null;
   useEffect(() => {
     if (!topCandidate || notificationPermission !== "granted") return;
     const now = new Date();
@@ -603,7 +623,8 @@ export default function SpriteHunterApp() {
         </nav>
         <div className="sidebar-foot">
           <div className="source-mini"><StatusDot status={error ? "unavailable" : loading ? "stale" : "available"} /><span>{loading ? t("Έλεγχος πηγών…", "Checking sources…") : error ? t("Σφάλμα παρόχου", "Provider error") : t("Ζωντανά μοντέλα", "Live models")}</span></div>
-          <p>v0.4 · installable PWA</p>
+          <p className="made-by">{t("Δημιουργία", "Created by")} <a href={CREATOR_URL} target="_blank" rel="noopener noreferrer">KonsKall</a></p>
+          <p>v{APP_VERSION} · installable PWA</p>
         </div>
       </aside>
 
@@ -628,7 +649,7 @@ export default function SpriteHunterApp() {
           {screen === "dashboard" && <DashboardView data={data} candidates={candidates} selected={selected} loading={loading} error={error} observer={observer} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onPoint={goPoint} onMap={() => setScreen("map")} onSelect={selectCandidate} />}
           {screen === "map" && <MapView candidates={candidates} selected={selected} observer={observer} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onRadar={setRadarVisible} onLightning={setLightningVisible} onInfrared={setInfraredVisible} onCloudTop={setCloudTopVisible} onInstability={setInstabilityVisible} onRings={setRingsVisible} onSelect={selectCandidate} onPoint={goPoint} />}
           {screen === "forecast" && <ForecastView candidates={candidates} selected={selected} onSelect={selectCandidate} onPoint={goPoint} />}
-          {screen === "point" && <PointView candidate={selected} observer={observer} lens={selectedLens} fov={fov} framing={framing} terrain={terrain} terrainLoading={terrainLoading} sky={currentSky} language={language} />}
+          {screen === "point" && <PointView candidate={selected} observer={observer} lens={selectedLens} fov={fov} framing={framing} terrain={terrain} terrainLoading={terrainLoading && !terrain} sky={currentSky} language={language} />}
           {screen === "sky" && <SkyView candidate={selected} terrain={terrain} fov={fov} lens={selectedLens} orientation={orientation} sky={currentSky} onOrientation={setOrientation} />}
           {screen === "aurora" && <AuroraView aurora={aurora} loading={auroraLoading} lens={selectedLens} observer={observer} forecast={data?.observerForecast ?? []} />}
           {screen === "locations" && <LocationsView observer={observer} locations={locations} candidate={selected} onObserver={setObserver} onLocations={setLocations} />}
@@ -753,8 +774,8 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
               <div><span>METAR / TAF</span><StatusDot status={aviation?.status ?? "stale"} /></div>
               <strong>{aviation?.stationId ? `${aviation.stationId} · ${aviation.distanceKm} km` : t("Χωρίς κοντινή παρατήρηση", "No nearby observation")}</strong>
               <p>{!aviation ? t("Αναμονή για AviationWeather…", "Waiting for AviationWeather…") : aviation.status !== "stale" && aviation.cloudSummary ? pick(aviation.cloudSummary) : pick(aviation.message)}</p>
-              {aviation?.visibilityM != null && <small>{t("Ορατότητα", "Visibility")} {(aviation.visibilityM / 1000).toFixed(1)} km · {t("άνεμος", "wind")} {aviation.windSpeedKmh ?? "—"} km/h · {aviation.flightCategory ?? "—"}</small>}
-              {aviation?.rawMetar && <code>{aviation.rawMetar}</code>}
+              {aviation?.visibilityM != null && <small>{t("Ορατότητα", "Visibility")} {aviation.visibilityAtLeast ? "≥" : ""}{(aviation.visibilityM / 1000).toFixed(aviation.visibilityM >= 10_000 ? 0 : 1)} km · {t("άνεμος", "wind")} {aviation.windSpeedKmh ?? "—"} km/h · {aviation.flightCategory ?? "—"}</small>}
+              {aviation?.rawMetar && <code title={t("Το αυτούσιο δελτίο METAR του αεροδρομίου", "The airport's raw METAR report")}>{aviation.rawMetar}</code>}
             </article>
             <article>
               <div><span>{t("METEOALARM · ΕΛΛΑΔΑ", "METEOALARM · GREECE")}</span><StatusDot status={alerts?.status ?? "stale"} /></div>

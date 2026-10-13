@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { eumetsatImageUrl, worldPixelToMercator } from "@/lib/providers/eumetsat";
-import { metarCloudCoverPercent, selectAviationReport } from "@/lib/providers/aviation-weather";
+import { metarCloudCoverPercent, metarCloudSummary, metarVisibility, selectAviationReport } from "@/lib/providers/aviation-weather";
 import { parseMeteoAlarmFeed } from "@/lib/providers/meteoalarm";
 import { assessAurora, parseOvationCoordinates } from "@/lib/providers/aurora";
 
@@ -52,6 +52,23 @@ describe("METAR cloud cover", () => {
   });
   it("uses the densest reported layer", () => {
     expect(metarCloudCoverPercent([{ cover: "FEW" }, { cover: "BKN" }], "")).toBe(80);
+  });
+});
+
+describe("METAR decoding", () => {
+  const raw = "METAR LGKL 132050Z VRB02KT 9999 FEW008 FEW018TCU SCT025 BKN080 15/14 Q1009";
+  it("reads 9999 as 10 km or more, not the API's 6 statute miles", () => {
+    expect(metarVisibility("6+", raw)).toEqual({ meters: 10_000, atLeast: true });
+    expect(metarVisibility("6+", "METAR KJFK 132051Z 18005KT P6SM FEW250")).toEqual({ meters: 9_656, atLeast: true });
+    expect(metarVisibility(3, "METAR LGAV 132050Z 4800 BR BECMG 9999")).toEqual({ meters: 4_828, atLeast: false });
+  });
+  it("names convective layers the API leaves out", () => {
+    const clouds = [{ cover: "FEW", base: 800 }, { cover: "FEW", base: 1800 }, { cover: "SCT", base: 2500 }, { cover: "BKN", base: 8000 }];
+    expect(metarCloudSummary(clouds, raw)).toEqual({
+      el: "FEW 800 ft · FEW 1800 ft (πυργωμένοι σωρείτες) · SCT 2500 ft · BKN 8000 ft",
+      en: "FEW 800 ft · FEW 1800 ft (towering cumulus) · SCT 2500 ft · BKN 8000 ft",
+    });
+    expect(metarCloudSummary([{ cover: "BKN", base: 3000 }], "METAR LGAV 132050Z 9999 BKN030 TEMPO BKN030CB").en).toBe("BKN 3000 ft");
   });
 });
 

@@ -224,6 +224,8 @@ export interface AviationObservation {
   observedAt: string | null;
   retrievedAt: string;
   visibilityM: number | null;
+  /** The report gives only a minimum (9999, CAVOK, "6+" miles): visibility is this or more. */
+  visibilityAtLeast: boolean;
   cloudCoverPercent: number | null;
   cloudSummary: Localized | null;
   windDirectionDeg: number | null;

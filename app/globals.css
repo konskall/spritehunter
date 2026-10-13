@@ -75,6 +75,9 @@ button, a, label, select, [role="button"] { touch-action: manipulation; }
 .sidebar nav button.active svg { color: var(--red-soft); }
 .sidebar-foot { margin-top: auto; padding: 18px 8px 2px; border-top: 1px solid var(--line); }
 .sidebar-foot p { color: var(--subtle); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; margin: 10px 0 0; }
+.sidebar-foot p.made-by { color: var(--muted); font-size: 12px; letter-spacing: .02em; text-transform: none; }
+.made-by a { color: var(--red-soft); font-weight: 650; text-decoration: none; }
+.made-by a:hover, .made-by a:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
 .source-mini { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
 .status-dot { width: 7px; height: 7px; flex: 0 0 auto; display: inline-block; border-radius: 50%; background: var(--subtle); box-shadow: 0 0 0 3px rgba(98,121,139,.12); }
 .status-available { background: var(--mint); box-shadow: 0 0 0 3px rgba(125,228,202,.11); }

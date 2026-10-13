@@ -3,6 +3,7 @@ import type { AviationObservation, Coordinates } from "@/lib/domain";
 import { inverseGeodesic } from "@/lib/geodesy";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
 import { tx, type Localized } from "@/lib/i18n";
+import { APP_VERSION } from "@/lib/version";
 
 const cloudSchema = z.object({
   cover: z.string(),
@@ -31,10 +32,19 @@ const tafSchema = z.object({
   validTimeTo: z.number().optional(),
 });
 
-function visibilityMeters(value: number | string | null | undefined) {
-  if (value == null) return null;
+// The observed part of a METAR, without trend (TEMPO/BECMG/NOSIG) or remarks.
+const metarBody = (rawOb: string) => rawOb.split(/\s(?:TEMPO|BECMG|NOSIG|RMK)\b/)[0];
+
+/**
+ * Visibility in metres. `9999` and CAVOK mean 10 km or more, and the API's "6+" statute
+ * miles is likewise a lower bound, so `atLeast` marks values that are only a minimum.
+ */
+export function metarVisibility(value: number | string | null | undefined, rawOb: string) {
+  if (/\b(9999|CAVOK)\b/.test(metarBody(rawOb))) return { meters: 10_000, atLeast: true };
+  if (value == null) return { meters: null, atLeast: false };
   const miles = typeof value === "number" ? value : Number.parseFloat(value);
-  return Number.isFinite(miles) ? Math.round(miles * 1609.344) : null;
+  if (!Number.isFinite(miles)) return { meters: null, atLeast: false };
+  return { meters: Math.round(miles * 1609.344), atLeast: typeof value === "string" && value.trim().endsWith("+") };
 }
 
 const CLOUD_FRACTIONS: Record<string, number> = { SKC: 0, CLR: 0, NSC: 0, NCD: 0, CAVOK: 0, FEW: 20, SCT: 50, BKN: 80, OVC: 100, VV: 100 };
@@ -69,16 +79,29 @@ export function selectAviationReport<T extends StationReport>(reports: T[], obse
   return ranked.find((item) => item.ageMinutes <= FRESH_REPORT_MINUTES) ?? ranked[0] ?? null;
 }
 
-function cloudSummary(clouds: z.infer<typeof cloudSchema>[]) {
+const CONVECTIVE_CLOUDS: Record<string, Localized> = {
+  TCU: tx("πυργωμένοι σωρείτες", "towering cumulus"),
+  CB: tx("σωρειτομελανίες", "cumulonimbus"),
+};
+
+/** Layers as "FEW 1800 ft (towering cumulus)"; the API drops TCU/CB, so they are read from the raw report. */
+export function metarCloudSummary(clouds: Array<{ cover: string; base?: number | null; type?: string | null }>, rawOb: string) {
   if (!clouds.length) return tx("Χωρίς δηλωμένες νεφώσεις", "No cloud reported");
-  const layers = clouds.map((cloud) => `${cloud.cover}${cloud.base == null ? "" : ` ${cloud.base} ft`}${cloud.type ? ` ${cloud.type}` : ""}`).join(" · ");
-  return tx(layers, layers);
+  const types = new Map<string, string>();
+  for (const match of metarBody(rawOb).matchAll(/\b(FEW|SCT|BKN|OVC|VV)(\d{3})(CB|TCU)\b/g)) types.set(`${match[1]}${Number(match[2]) * 100}`, match[3]);
+  const layers = (language: keyof Localized) => clouds.map((cloud) => {
+    const type = cloud.type ?? types.get(`${cloud.cover}${cloud.base}`);
+    const convective = type ? CONVECTIVE_CLOUDS[type.toUpperCase()] : undefined;
+    const label = convective ? ` (${convective[language]})` : type ? ` ${type}` : "";
+    return `${cloud.cover}${cloud.base == null ? "" : ` ${cloud.base} ft`}${label}`;
+  }).join(" · ");
+  return tx(layers("el"), layers("en"));
 }
 
 export function unavailableAviation(message: Localized, retrievedAt = new Date().toISOString()): AviationObservation {
   return {
     status: "unavailable", stationId: null, stationName: null, distanceKm: null,
-    observedAt: null, retrievedAt, visibilityM: null, cloudCoverPercent: null,
+    observedAt: null, retrievedAt, visibilityM: null, visibilityAtLeast: false, cloudCoverPercent: null,
     cloudSummary: null, windDirectionDeg: null, windSpeedKmh: null, weather: null,
     flightCategory: null, rawMetar: null, rawTaf: null, tafValidFrom: null,
     tafValidTo: null, message,
@@ -99,7 +122,7 @@ export async function fetchNearestAviationWeather(observer: Coordinates): Promis
   const raw = await fetchJsonWithRetry<unknown>(`https://aviationweather.gov/api/data/metar?${params}`, {
     retries: 1,
     timeoutMs: 12_000,
-    headers: { Accept: "application/json", "User-Agent": "SpriteHunter/0.3 (upper-atmosphere-observatory)" },
+    headers: { Accept: "application/json", "User-Agent": `SpriteHunter/${APP_VERSION} (upper-atmosphere-observatory)` },
   });
   const reports = z.array(metarSchema).parse(raw);
   const nearest = selectAviationReport(reports, observer);
@@ -109,13 +132,15 @@ export async function fetchNearestAviationWeather(observer: Coordinates): Promis
     const tafRaw = await fetchJsonWithRetry<unknown>(`https://aviationweather.gov/api/data/taf?ids=${encodeURIComponent(nearest.report.icaoId)}&format=json&time=valid`, {
       retries: 0,
       timeoutMs: 8_000,
-      headers: { Accept: "application/json", "User-Agent": "SpriteHunter/0.3 (upper-atmosphere-observatory)" },
+      headers: { Accept: "application/json", "User-Agent": `SpriteHunter/${APP_VERSION} (upper-atmosphere-observatory)` },
     });
     taf = z.array(tafSchema).parse(tafRaw)[0] ?? null;
   } catch {
     taf = null;
   }
   const clouds = nearest.report.clouds ?? [];
+  const rawOb = nearest.report.rawOb ?? "";
+  const visibility = metarVisibility(nearest.report.visib, rawOb);
   const observedAt = new Date(nearest.report.obsTime * 1000).toISOString();
   const ageMinutes = Math.round(nearest.ageMinutes);
   return {
@@ -125,9 +150,10 @@ export async function fetchNearestAviationWeather(observer: Coordinates): Promis
     distanceKm: Math.round(nearest.distanceKm),
     observedAt,
     retrievedAt,
-    visibilityM: visibilityMeters(nearest.report.visib),
-    cloudCoverPercent: metarCloudCoverPercent(clouds, nearest.report.rawOb ?? ""),
-    cloudSummary: cloudSummary(clouds),
+    visibilityM: visibility.meters,
+    visibilityAtLeast: visibility.atLeast,
+    cloudCoverPercent: metarCloudCoverPercent(clouds, rawOb),
+    cloudSummary: metarCloudSummary(clouds, rawOb),
     windDirectionDeg: typeof nearest.report.wdir === "number" ? nearest.report.wdir : null,
     windSpeedKmh: nearest.report.wspd == null ? null : Math.round(nearest.report.wspd * 1.852),
     weather: nearest.report.wxString ?? null,

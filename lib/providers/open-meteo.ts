@@ -301,7 +301,10 @@ function scoreInputForHour(
     && (aviation.distanceKm ?? Number.POSITIVE_INFINITY) <= 180
     && Math.abs(new Date(hour.time).getTime() - new Date(aviation.observedAt).getTime()) <= 3 * 60 * 60_000;
   const metarCloud = metarRelevant ? aviation.cloudCoverPercent : null;
-  const metarVisibility = metarRelevant ? aviation.visibilityM : null;
+  // "10 km or more" (9999, CAVOK) is only a minimum and must not lower a clearer forecast.
+  const metarVisibility = !metarRelevant || aviation.visibilityM == null
+    ? null
+    : aviation.visibilityAtLeast ? Math.max(aviation.visibilityM, observerHour?.visibilityM ?? 0) : aviation.visibilityM;
   const agreement = cloudAgreement(observerHour);
   const sky = skyState(new Date(hour.time), observer.latitude, observer.longitude, geometry.initialBearingDeg);
   return {
