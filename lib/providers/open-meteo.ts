@@ -4,6 +4,9 @@ import type {
   AviationObservation,
   CandidateScoreInput,
   Coordinates,
+  LightningCluster,
+  LightningObservation,
+  ObservedLightning,
   OpportunityResponse,
   StormCandidate,
   WeatherHour,
@@ -15,6 +18,7 @@ import { fetchJsonWithRetry } from "@/lib/providers/fetch";
 import { TtlCache } from "@/lib/bounded-cache";
 import { fetchNearestAviationWeather, unavailableAviation } from "@/lib/providers/aviation-weather";
 import { fetchMeteoAlarm, unavailableMeteoAlarm } from "@/lib/providers/meteoalarm";
+import { fetchLightningObservation } from "@/lib/providers/mtg-lightning";
 
 const numberArray = z.array(z.number().nullable());
 const weatherSchema = z.object({
@@ -56,7 +60,7 @@ const airSchema = z.object({
   }),
 });
 
-type WeatherPayload = z.infer<typeof weatherSchema>;
+export type WeatherPayload = z.infer<typeof weatherSchema>;
 const CACHE_TTL_MS = 15 * 60_000;
 const SERVER_ONLY_MESSAGE = "Διαθέσιμο μόνο μέσω του server της εφαρμογής (ο πάροχος δεν επιτρέπει κλήσεις από browser).";
 // Candidates are only searched over the next 48 h; fetching more only slowed the provider.
@@ -64,7 +68,26 @@ const FORECAST_HOURS = 48;
 const CANDIDATE_WINDOW_HOURS = 48;
 // Two screening requests: fewer parallel calls avoid Open-Meteo 429 bursts.
 const SCREENING_BATCH_SIZE = 12;
-const opportunityCache = new TtlCache<OpportunityResponse>(100);
+// Forecast data changes hourly; lightning is merged on every request from its own 4-minute cache.
+interface ForecastBase {
+  fetchedAt: string;
+  observerForecast: WeatherHour[];
+  airQuality: AirQualityHour[];
+  aviation: AviationObservation;
+  weatherAlerts: OpportunityResponse["weatherAlerts"];
+  payloads: WeatherPayload[];
+  screeningFailures: number;
+  gridSize: number;
+}
+const forecastCache = new TtlCache<ForecastBase>(100);
+// Forecast hours this close to the newest MTG-LI frame are checked against the observation.
+const NOWCAST_WINDOW_MS = 60 * 60_000;
+// Lightning within this distance of a forecast cell is treated as the same storm.
+const SAME_STORM_KM = 100;
+// Model context for an observed storm comes from the nearest screening cell within this range.
+const MODEL_CONTEXT_KM = 150;
+// The lightning box extends past the scan radius so storms straddling its edge are whole.
+const LIGHTNING_MARGIN_KM = 60;
 
 const WEATHER_VARIABLES = [
   "temperature_2m",
@@ -197,6 +220,17 @@ function stormSignal(hour: WeatherHour) {
   return cape / 80 + precipitation * 2 + liftedBoost + moistureBoost + (thunderCode ? 8 : 0) - cinPenalty;
 }
 
+function emptyHour(time: string): WeatherHour {
+  return {
+    time, temperatureC: null, relativeHumidity: null, precipitationMm: null, precipitationProbability: null,
+    cloudCover: null, cloudCoverLow: null, cloudCoverMid: null, cloudCoverHigh: null, visibilityM: null,
+    windSpeedKmh: null, windDirectionDeg: null, capeJkg: null, convectiveInhibitionJkg: null, liftedIndex: null,
+    precipitableWaterKgM2: null, weatherCode: null,
+  };
+}
+
+const isThunderCode = (code: number | null) => code != null && [95, 96, 99].includes(code);
+
 function closestHour(hours: WeatherHour[], time: string) {
   const target = new Date(time).getTime();
   return hours.reduce<WeatherHour | null>((closest, hour) => {
@@ -269,7 +303,7 @@ export function buildCandidate(
     .flatMap((hour) => {
       const cape = hour.capeJkg ?? 0;
       const precipitation = hour.precipitationMm ?? 0;
-      const thunderCode = hour.weatherCode != null && [95, 96, 99].includes(hour.weatherCode);
+      const thunderCode = isThunderCode(hour.weatherCode);
       if (!thunderCode && !(cape >= 250 && precipitation >= 0.2) && cape < 600) return [];
       const scoreInput = scoreInputForHour(observer, hour, thunderCode, lightningPotentialAt(target, hour.time), observerHours, aviation, geometry);
       return [{ hour, scoreInput, score: scoreOpportunity({ ...scoreInput, terrain: "unknown" }), signal: stormSignal(hour) }];
@@ -318,14 +352,126 @@ export function buildCandidate(
   };
 }
 
-export async function fetchOpportunities(
+function observedDetail(cluster: LightningCluster, nowMs: number): ObservedLightning {
+  return {
+    observedAt: cluster.observedAt,
+    ageMinutes: Math.max(0, Math.round((nowMs - Date.parse(cluster.observedAt)) / 60_000)),
+    areaKm2: cluster.areaKm2,
+    maxFlashesPer5Min: cluster.maxFlashesPer5Min,
+    frames: cluster.frames,
+    windowMinutes: cluster.windowMinutes,
+  };
+}
+
+const distanceKmBetween = (a: Coordinates, b: Coordinates) => inverseGeodesic(a, b).distanceM / 1000;
+
+export interface LightningMergeContext {
+  observerHours: WeatherHour[];
+  aviation: AviationObservation;
+  payloads: WeatherPayload[];
+  minimumKm: number;
+  maximumKm: number;
+  fetchedAt: string;
+  nowMs?: number;
+}
+
+function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster, context: LightningMergeContext, nowMs: number): StormCandidate | null {
+  const coordinates: Coordinates = { latitude: cluster.centroid.latitude, longitude: cluster.centroid.longitude, elevationM: 0 };
+  const geometry = inverseGeodesic(observer, coordinates);
+  const distanceKm = geometry.distanceM / 1000;
+  if (distanceKm < context.minimumKm || distanceKm > context.maximumKm) return null;
+
+  const nearest = context.payloads
+    .map((payload) => ({ payload, distanceKm: distanceKmBetween(coordinates, payload) }))
+    .sort((a, b) => a.distanceKm - b.distanceKm)[0];
+  const model = nearest && nearest.distanceKm <= MODEL_CONTEXT_KM ? nearest.payload : null;
+  const modelHour = model ? closestHour(weatherHours(model), cluster.observedAt) : null;
+  const hour: WeatherHour = { ...(modelHour ?? emptyHour(cluster.observedAt)), time: cluster.observedAt };
+  const detail = observedDetail(cluster, nowMs);
+  const scoreInput: CandidateScoreInput = {
+    ...scoreInputForHour(observer, hour, isThunderCode(hour.weatherCode), model ? lightningPotentialAt(model, cluster.observedAt) : null, context.observerHours, context.aviation, geometry),
+    lightning: "observed",
+    observedLightning: detail,
+  };
+  return {
+    id: cluster.id,
+    coordinates,
+    forecastValidAt: cluster.observedAt,
+    distanceKm: Math.round(distanceKm * 10) / 10,
+    bearingDeg: Math.round(geometry.initialBearingDeg * 10) / 10,
+    // Sprites appear over the storm's stratiform region, often tens of km from the lightning core.
+    uncertaintyKm: Math.round(Math.max(20, Math.min(90, cluster.radiusKm + 15))),
+    capeJkg: hour.capeJkg,
+    convectiveInhibitionJkg: hour.convectiveInhibitionJkg,
+    liftedIndex: hour.liftedIndex,
+    precipitableWaterKgM2: hour.precipitableWaterKgM2,
+    precipitationMm: hour.precipitationMm,
+    weatherCode: hour.weatherCode,
+    lightningPotentialJkg: scoreInput.lightningPotentialJkg ?? null,
+    highCloudPercent: hour.cloudCoverHigh,
+    windSpeedKmh: hour.windSpeedKmh,
+    windDirectionDeg: hour.windDirectionDeg,
+    pointing: altitudeEnvelope(observer, coordinates),
+    score: scoreOpportunity({ ...scoreInput, terrain: "unknown" }),
+    scoreInput,
+    source: "observed",
+    observedLightning: detail,
+    provenance: {
+      provider: "EUMETSAT MTG-LI",
+      kind: "observation",
+      observedAt: cluster.observedAt,
+      validAt: cluster.observedAt,
+      retrievedAt: context.fetchedAt,
+      resolution: "Accumulated Flash Area, πλέγμα ~0,04°",
+      status: "available",
+      freshnessMinutes: detail.ageMinutes,
+      quality: "medium",
+      message: "Παρατηρημένη κεραυνική δραστηριότητα από δορυφόρο· δεν διακρίνει CG/IC ούτε πολικότητα.",
+    },
+  };
+}
+
+function withLightning(candidate: StormCandidate, lightning: CandidateScoreInput["lightning"], detail: ObservedLightning | null): StormCandidate {
+  const scoreInput = { ...candidate.scoreInput, lightning, observedLightning: detail };
+  return { ...candidate, scoreInput, observedLightning: detail, score: scoreOpportunity({ ...scoreInput, terrain: "unknown" }) };
+}
+
+/**
+ * Combines MTG-LI storms with forecast cells: every observed storm in range becomes a
+ * target, forecast cells valid near the newest frame are confirmed by nearby lightning
+ * (or replaced by the observed storm), and those with no lightning nearby are damped.
+ */
+export function mergeLightningObservation(
   observer: Coordinates,
-  minimumKm = 200,
-  maximumKm = 600,
-  { serverOnlySources = true }: { serverOnlySources?: boolean } = {},
-): Promise<OpportunityResponse> {
+  forecastCandidates: StormCandidate[],
+  observation: LightningObservation | null,
+  context: LightningMergeContext,
+): StormCandidate[] {
+  if (!observation || observation.status !== "available" || !observation.latestFrameAt) return forecastCandidates;
+  const nowMs = context.nowMs ?? Date.now();
+  const frameMs = Date.parse(observation.latestFrameAt);
+  const observed = observation.clusters
+    .map((cluster) => buildObservedCandidate(observer, cluster, context, nowMs))
+    .filter((candidate): candidate is StormCandidate => candidate !== null);
+  const forecast = forecastCandidates.flatMap((candidate) => {
+    if (Math.abs(Date.parse(utcIso(candidate.forecastValidAt)) - frameMs) > NOWCAST_WINDOW_MS) return [candidate];
+    const nearest = observation.clusters
+      .map((cluster) => ({ cluster, distanceKm: distanceKmBetween(candidate.coordinates, cluster.centroid) }))
+      .sort((a, b) => a.distanceKm - b.distanceKm)[0];
+    if (!nearest || nearest.distanceKm > SAME_STORM_KM) return [withLightning(candidate, "not_detected", null)];
+    if (observed.some((target) => distanceKmBetween(target.coordinates, candidate.coordinates) <= SAME_STORM_KM)) return [];
+    return [withLightning(candidate, "observed", observedDetail(nearest.cluster, nowMs))];
+  });
+  return [...observed, ...forecast].sort((a, b) => b.score.total - a.score.total);
+}
+
+const serverOnlyLightning = (retrievedAt: string): LightningObservation => ({
+  status: "unavailable", retrievedAt, latestFrameAt: null, windowMinutes: 0, clusters: [], message: SERVER_ONLY_MESSAGE,
+});
+
+async function loadForecastBase(observer: Coordinates, minimumKm: number, maximumKm: number, serverOnlySources: boolean): Promise<ForecastBase> {
   const cacheKey = `${observer.latitude.toFixed(3)}:${observer.longitude.toFixed(3)}:${minimumKm}:${maximumKm}:${serverOnlySources}`;
-  const cached = opportunityCache.get(cacheKey);
+  const cached = forecastCache.get(cacheKey);
   if (cached) return cached;
 
   const grid = makeScreeningGrid(observer, minimumKm, maximumKm);
@@ -352,39 +498,68 @@ export async function fetchOpportunities(
   }
 
   const fetchedAt = new Date().toISOString();
-  const observerForecast = weatherHours(observerResult.value[0]);
-  const screenedPayloads = screeningResults.flatMap((result) => result.status === "fulfilled" ? result.value : []);
-  const screeningFailures = screeningResults.filter((result) => result.status === "rejected").length;
   const airParsed = airResult.status === "fulfilled" ? airSchema.safeParse(airResult.value) : null;
-  const airQuality = airParsed?.success ? airHours(airParsed.data) : [];
-  const aviation = aviationResult.status === "fulfilled"
-    ? aviationResult.value
-    : unavailableAviation(serverOnlySources ? "Η πραγματική παρατήρηση METAR δεν ήταν διαθέσιμη." : SERVER_ONLY_MESSAGE, fetchedAt);
-  const weatherAlerts = alertResult.status === "fulfilled"
-    ? alertResult.value
-    : unavailableMeteoAlarm(serverOnlySources ? "Η επίσημη ροή προειδοποιήσεων δεν ήταν διαθέσιμη." : SERVER_ONLY_MESSAGE, fetchedAt);
-  const candidates = screenedPayloads
-    .map((payload) => buildCandidate(observer, payload, observerForecast, aviation, fetchedAt))
-    .filter((candidate): candidate is StormCandidate => candidate !== null)
+  const value: ForecastBase = {
+    fetchedAt,
+    observerForecast: weatherHours(observerResult.value[0]),
+    airQuality: airParsed?.success ? airHours(airParsed.data) : [],
+    aviation: aviationResult.status === "fulfilled"
+      ? aviationResult.value
+      : unavailableAviation(serverOnlySources ? "Η πραγματική παρατήρηση METAR δεν ήταν διαθέσιμη." : SERVER_ONLY_MESSAGE, fetchedAt),
+    weatherAlerts: alertResult.status === "fulfilled"
+      ? alertResult.value
+      : unavailableMeteoAlarm(serverOnlySources ? "Η επίσημη ροή προειδοποιήσεων δεν ήταν διαθέσιμη." : SERVER_ONLY_MESSAGE, fetchedAt),
+    payloads: screeningResults.flatMap((result) => result.status === "fulfilled" ? result.value : []),
+    screeningFailures: screeningResults.filter((result) => result.status === "rejected").length,
+    gridSize: grid.length,
+  };
+  forecastCache.set(cacheKey, value, CACHE_TTL_MS);
+  return value;
+}
+
+export async function fetchOpportunities(
+  observer: Coordinates,
+  minimumKm = 200,
+  maximumKm = 600,
+  { serverOnlySources = true }: { serverOnlySources?: boolean } = {},
+): Promise<OpportunityResponse> {
+  const [base, lightning] = await Promise.all([
+    loadForecastBase(observer, minimumKm, maximumKm, serverOnlySources),
+    // EUMETView frames are decoded on the server; the browser fallback does not repeat that work.
+    serverOnlySources
+      ? fetchLightningObservation(observer, maximumKm + LIGHTNING_MARGIN_KM)
+      : Promise.resolve(serverOnlyLightning(new Date().toISOString())),
+  ]);
+  const nowMs = Date.now();
+  const { fetchedAt, observerForecast, airQuality, aviation, weatherAlerts, payloads, screeningFailures, gridSize } = base;
+  const forecastCandidates = payloads
+    .map((payload) => buildCandidate(observer, payload, observerForecast, aviation, fetchedAt, nowMs))
+    .filter((candidate): candidate is StormCandidate => candidate !== null);
+  const candidates = mergeLightningObservation(observer, forecastCandidates, lightning, {
+    observerHours: observerForecast, aviation, payloads, minimumKm, maximumKm, fetchedAt, nowMs,
+  })
     .sort((a, b) => b.score.total - a.score.total)
     .slice(0, 10);
+  const observedCount = candidates.filter((candidate) => candidate.source === "observed").length;
 
   const xweatherConfigured = typeof process !== "undefined" && Boolean(process.env.XWEATHER_CLIENT_ID && process.env.XWEATHER_CLIENT_SECRET);
-  const screeningStatus = screeningFailures === 0 ? "available" : screenedPayloads.length ? "stale" : "unavailable";
+  const screeningStatus = screeningFailures === 0 ? "available" : payloads.length ? "stale" : "unavailable";
   const hasLightningPotential = candidates.some((candidate) => candidate.lightningPotentialJkg != null);
   const screeningMessage = screeningFailures === 0
-    ? `Πρόγνωση θέσης και ${screenedPayloads.length} κυψέλες σάρωσης διαθέσιμες.`
-    : `Πρόγνωση θέσης διαθέσιμη· απάντησαν ${screenedPayloads.length}/${grid.length} κυψέλες σάρωσης (${screeningFailures} αποτυχίες).`;
-  const value: OpportunityResponse = {
+    ? `Πρόγνωση θέσης και ${payloads.length} κυψέλες σάρωσης διαθέσιμες.`
+    : `Πρόγνωση θέσης διαθέσιμη· απάντησαν ${payloads.length}/${gridSize} κυψέλες σάρωσης (${screeningFailures} αποτυχίες).`;
+  return {
     observer,
     fetchedAt,
     observerForecast,
     airQuality,
     aviation,
     weatherAlerts,
+    lightning,
     candidates,
     providers: [
       { id: "open_meteo", label: "Open-Meteo Forecast", status: screeningStatus, checkedAt: fetchedAt, message: screeningMessage },
+      { id: "mtg_li", label: "EUMETSAT MTG-LI κεραυνοί", status: lightning.status, checkedAt: lightning.retrievedAt, message: lightning.message },
       {
         id: "open_meteo_lpi",
         label: "Open-Meteo lightning potential",
@@ -409,16 +584,16 @@ export async function fetchOpportunities(
         label: "Vaisala Xweather (προαιρετικό)",
         status: xweatherConfigured ? "available" : "not_configured",
         checkedAt: fetchedAt,
-        message: xweatherConfigured ? "Τα credentials έχουν ρυθμιστεί· οι κλήσεις περιορίζονται σε επιλεγμένες περιοχές στόχων." : "Δεν απαιτείται για τον live χάρτη: το δωρεάν MTG-LI καλύπτει τη συνολική δραστηριότητα. Xweather χρειάζεται μόνο για δεδομένα CG/IC, πολικότητας και peak current.",
+        message: xweatherConfigured ? "Τα credentials έχουν ρυθμιστεί· οι κλήσεις περιορίζονται σε επιλεγμένες περιοχές στόχων." : "Δεν απαιτείται: το δωρεάν MTG-LI τροφοδοτεί ήδη τη βαθμολογία με παρατηρημένους κεραυνούς. Xweather χρειάζεται μόνο για δεδομένα CG/IC, πολικότητας και peak current.",
       },
       { id: "terrain", label: "OpenTopoData SRTM", status: "stale", checkedAt: fetchedAt, message: "Το DEM ελέγχεται μόνο κατά την επιλογή στόχου, ώστε να προστατεύεται το δημόσιο quota." },
     ],
     warnings: [
-      "Οι υποψήφιοι στόχοι είναι προγνωστικές κυψέλες μοντέλου και όχι παρατηρημένες καταιγίδες.",
+      observedCount
+        ? "Οι στόχοι «παρατηρημένη καταιγίδα» βασίζονται σε πραγματικούς κεραυνούς MTG-LI· οι υπόλοιποι είναι προγνωστικές κυψέλες μοντέλου."
+        : "Οι υποψήφιοι στόχοι είναι προγνωστικές κυψέλες μοντέλου και όχι παρατηρημένες καταιγίδες.",
       "Ο δείκτης 0–100 είναι ευρετική βαθμολογία ευκαιρίας, όχι ποσοστό πιθανότητας εμφάνισης TLE.",
       ...(screeningFailures ? ["Μερικά τμήματα της γεωγραφικής σάρωσης δεν απάντησαν. Τα διαθέσιμα δεδομένα εμφανίζονται χωρίς συνθετική συμπλήρωση."] : []),
     ],
   };
-  opportunityCache.set(cacheKey, value, CACHE_TTL_MS);
-  return value;
 }

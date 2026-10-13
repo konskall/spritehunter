@@ -73,6 +73,35 @@ export interface ScoreBreakdown {
   limitations: string[];
 }
 
+/** Lightning that EUMETSAT MTG-LI observed at (or near) a target. */
+export interface ObservedLightning {
+  /** Start of the newest 5-minute MTG-LI frame that contains this storm. */
+  observedAt: string;
+  ageMinutes: number;
+  /** Area of the lit MTG-LI pixels across the sampled frames. */
+  areaKm2: number;
+  /** Highest per-pixel accumulated flash count in one 5-minute frame (legend saturates at 20). */
+  maxFlashesPer5Min: number;
+  /** Number of sampled 5-minute frames in which the storm was lit. */
+  frames: number;
+  windowMinutes: number;
+}
+
+export interface LightningCluster extends ObservedLightning {
+  id: string;
+  centroid: Coordinates;
+  radiusKm: number;
+}
+
+export interface LightningObservation {
+  status: DataStatus;
+  retrievedAt: string;
+  latestFrameAt: string | null;
+  windowMinutes: number;
+  clusters: LightningCluster[];
+  message: string;
+}
+
 /** Everything the opportunity score needs except terrain, which is verified later per target. */
 export interface CandidateScoreInput {
   capeJkg: number | null;
@@ -89,7 +118,9 @@ export interface CandidateScoreInput {
   distanceKm: number;
   sunAltitudeDeg: number;
   moonInterference: boolean;
-  lightning: "observed" | "unavailable" | "not_configured";
+  /** "not_detected": MTG-LI was checked for the valid time and saw no lightning near the target. */
+  lightning: "observed" | "not_detected" | "unavailable" | "not_configured";
+  observedLightning?: ObservedLightning | null;
 }
 
 export type TerrainStatus = "clear" | "partial" | "blocked" | "unknown";
@@ -115,11 +146,12 @@ export interface StormCandidate {
   score: ScoreBreakdown;
   scoreInput: CandidateScoreInput;
   source: "forecast" | "observed";
+  observedLightning?: ObservedLightning | null;
   provenance: Provenance;
 }
 
 export interface ProviderHealth {
-  id: "open_meteo" | "open_meteo_lpi" | "air_quality" | "aviation_weather" | "meteoalarm" | "rainviewer" | "xweather" | "terrain";
+  id: "open_meteo" | "open_meteo_lpi" | "mtg_li" | "air_quality" | "aviation_weather" | "meteoalarm" | "rainviewer" | "xweather" | "terrain";
   label: string;
   status: DataStatus;
   checkedAt: string;
@@ -198,6 +230,7 @@ export interface OpportunityResponse {
   airQuality: AirQualityHour[];
   aviation: AviationObservation;
   weatherAlerts: WeatherAlertResponse;
+  lightning?: LightningObservation;
   candidates: StormCandidate[];
   providers: ProviderHealth[];
   warnings: string[];
