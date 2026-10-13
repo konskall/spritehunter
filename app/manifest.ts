@@ -2,9 +2,9 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "SpriteHunter — Upper Atmosphere Observatory",
+    name: "SpriteHunter — Παρατηρητήριο Ανώτερης Ατμόσφαιρας",
     short_name: "SpriteHunter",
-    description: "Σχεδιασμός παρατήρησης και φωτογράφισης παροδικών φωτεινών φαινομένων.",
+    description: "Πρόγνωση, στόχευση και φωτογράφιση Red Sprites και TLE από την Ελλάδα, με ζωντανούς κεραυνούς EUMETSAT MTG-LI.",
     id: "/",
     start_url: "/",
     scope: "/",

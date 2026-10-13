@@ -81,6 +81,14 @@ describe("MeteoAlarm ordering and counts", () => {
     ]), "2026-10-12T17:00:00Z", sparta);
     expect(result.alerts.map((alert) => alert.id)).toEqual(["severe", "moderate"]);
   });
+  it("links each alert to its region page on meteoalarm.org, not to the CAP XML", () => {
+    const links = `<link title="East Peloponnisos" href="https://meteoalarm.org?geocode=EMMA_ID:GR008" hreflang="en"/><link type="application/cap+xml" href="https://feeds.meteoalarm.org/api/v1/warnings/feeds-greece/abc"/><link title="Greece" rel="related" href="https://meteoalarm.org?region=GR" hreflang="en"/>`;
+    const withLinks = entry("a", "East Peloponnisos", "Severe Thunderstorm warning", "Severe").replace("</entry>", `${links}</entry>`);
+    const withoutArea = entry("b", "Thraki", "Yellow Warning", "Moderate").replace("</entry>", `<link type="application/cap+xml" href="https://feeds.meteoalarm.org/api/v1/warnings/feeds-greece/def"/></entry>`);
+    const result = parseMeteoAlarmFeed(feed([withLinks, withoutArea]), "2026-10-12T17:00:00Z");
+    expect(result.alerts.find((alert) => alert.id === "a")?.link).toBe("https://meteoalarm.org?geocode=EMMA_ID:GR008");
+    expect(result.alerts.find((alert) => alert.id === "b")?.link).toBe("https://meteoalarm.org?region=GR");
+  });
   it("decodes double-escaped area names", () => {
     const result = parseMeteoAlarmFeed(feed([entry("e", "East Sterea &amp;amp; Evvoia", "Yellow Warning", "Moderate")]), "2026-10-12T17:00:00Z");
     expect(result.alerts[0].area).toBe("East Sterea & Evvoia");

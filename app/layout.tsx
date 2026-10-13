@@ -2,13 +2,24 @@ import type { Metadata, Viewport } from "next";
 import PwaRegister from "@/components/PwaRegister";
 import "./globals.css";
 
+const SITE_URL = "https://spritehunter-observatory.peppystar32.chatgpt.site";
+const TITLE = "SpriteHunter — Πρόγνωση & φωτογράφιση Red Sprites στην Ελλάδα";
+const DESCRIPTION = "Δωρεάν παρατηρητήριο Red Sprites και TLE: ζωντανοί κεραυνοί EUMETSAT MTG-LI, πρόγνωση καταιγίδων και ακριβής στόχευση κάμερας από την Ελλάδα.";
+
 export const metadata: Metadata = {
-  metadataBase: new URL("https://spritehunter-observatory.peppystar32.chatgpt.site"),
-  title: "SpriteHunter — Upper Atmosphere Observatory",
-  description: "Επιστημονικός σχεδιασμός παρατήρησης και φωτογράφισης Red Sprites από την Ελλάδα.",
+  metadataBase: new URL(SITE_URL),
+  title: TITLE,
+  description: DESCRIPTION,
   applicationName: "SpriteHunter",
+  keywords: ["Red Sprites", "sprites", "TLE", "transient luminous events", "ELVES", "Blue Jets", "κεραυνοί", "καταιγίδες", "φωτογράφιση κεραυνών", "EUMETSAT MTG-LI", "αστροφωτογραφία", "Ελλάδα"],
+  authors: [{ name: "SpriteHunter" }],
+  creator: "SpriteHunter",
+  category: "science",
   manifest: "/manifest.webmanifest",
   alternates: { canonical: "/" },
+  robots: { index: true, follow: true, googleBot: { index: true, follow: true, "max-image-preview": "large", "max-snippet": -1 } },
+  // Stops iOS from turning coordinates and other numbers into phone links.
+  formatDetection: { telephone: false },
   icons: {
     icon: [
       { url: "/spritehunter-icon-192.png", type: "image/png", sizes: "192x192" },
@@ -22,14 +33,14 @@ export const metadata: Metadata = {
     locale: "el_GR",
     url: "/",
     siteName: "SpriteHunter",
-    title: "SpriteHunter — Παρατηρητήριο Ανώτερης Ατμόσφαιρας",
-    description: "Εντοπισμός καταιγίδων, επιστημονική στόχευση και φωτογράφιση Red Sprites και TLEs από την Ελλάδα.",
+    title: TITLE,
+    description: DESCRIPTION,
     images: [{ url: "/spritehunter-og.png", width: 1200, height: 630, alt: "SpriteHunter — εντοπισμός και στόχευση Red Sprites και TLEs" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "SpriteHunter — Παρατηρητήριο Ανώτερης Ατμόσφαιρας",
-    description: "Εντοπισμός καταιγίδων και στόχευση για Red Sprites και TLEs.",
+    title: TITLE,
+    description: DESCRIPTION,
     images: ["/spritehunter-og.png"],
   },
   appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "SpriteHunter" },
@@ -43,6 +54,30 @@ export const viewport: Viewport = {
   viewportFit: "cover",
 };
 
+const structuredData = {
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  name: "SpriteHunter",
+  alternateName: "SpriteHunter — Παρατηρητήριο Ανώτερης Ατμόσφαιρας",
+  url: `${SITE_URL}/`,
+  description: DESCRIPTION,
+  image: `${SITE_URL}/spritehunter-og.png`,
+  inLanguage: "el",
+  applicationCategory: "UtilitiesApplication",
+  operatingSystem: "Web, Android, iOS",
+  isAccessibleForFree: true,
+  offers: { "@type": "Offer", price: "0", priceCurrency: "EUR" },
+  about: ["Red sprite", "Transient luminous event", "Κεραυνός", "Καταιγίδα"],
+};
+
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="el"><body><PwaRegister />{children}</body></html>;
+  return (
+    <html lang="el">
+      <body>
+        <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData).replace(/</g, "\\u003c") }} />
+        <PwaRegister />
+        {children}
+      </body>
+    </html>
+  );
 }

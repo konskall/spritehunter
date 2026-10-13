@@ -2,6 +2,7 @@ import type { Coordinates, WeatherAlert, WeatherAlertResponse } from "@/lib/doma
 import { inverseGeodesic } from "@/lib/geodesy";
 
 const FEED_URL = "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-greece";
+const GREECE_PAGE = "https://meteoalarm.org?region=GR";
 const MAX_LISTED_ALERTS = 40;
 const NEARBY_KM = 150;
 
@@ -59,9 +60,10 @@ export function parseMeteoAlarmFeed(xml: string, retrievedAt = new Date().toISOS
     const severity = valueOf(entry, "cap:severity") ?? "Unknown";
     const onset = valueOf(entry, "cap:onset");
     const expires = valueOf(entry, "cap:expires");
-    const capLink = entry.match(/<link\b[^>]*type=["']application\/cap\+xml["'][^>]*href=["']([^"']+)["']/i)?.[1];
+    // The entry's CAP link is raw XML; the region page on meteoalarm.org is the readable warning.
+    const regionLink = entry.match(/<link\b[^>]*href=["'](https:\/\/meteoalarm\.org[^"']*geocode=[^"']+)["']/i)?.[1];
     if (!id || !area || !event || (expires && new Date(expires).getTime() < now)) return null;
-    return { id, area, event, severity, onset, expires, distanceKm: areaDistanceKm(area, observer), link: decodeXml(capLink ?? "https://meteoalarm.org/?lang=el_GR") };
+    return { id, area, event, severity, onset, expires, distanceKm: areaDistanceKm(area, observer), link: decodeXml(regionLink ?? GREECE_PAGE) };
   }).filter((alert): alert is WeatherAlert => alert !== null);
 
   const isNearby = (alert: WeatherAlert) => alert.distanceKm != null && alert.distanceKm <= NEARBY_KM;

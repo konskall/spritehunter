@@ -12,6 +12,7 @@ import {
   CalendarClock,
   Camera,
   Check,
+  ChevronDown,
   ChevronRight,
   Cloud,
   Compass,
@@ -122,6 +123,7 @@ const strings = {
     subtitle: "Παρατηρητήριο Ανώτερης Ατμόσφαιρας",
     refresh: "Ανανέωση δεδομένων",
     updated: "Ενημερώθηκε",
+    scanning: "Αναζήτηση καταιγίδων για Red Sprites",
     noOpportunity: "Δεν εντοπίστηκε κατάλληλη ευκαιρία τώρα",
     insufficient: "Ανεπαρκή δεδομένα",
     possible: "Πιθανή ευκαιρία",
@@ -134,6 +136,7 @@ const strings = {
     subtitle: "Upper Atmosphere Observatory",
     refresh: "Refresh data",
     updated: "Updated",
+    scanning: "Scanning storms for Red Sprites",
     noOpportunity: "No suitable opportunity currently detected",
     insufficient: "Insufficient data",
     possible: "Possible opportunity",
@@ -569,8 +572,7 @@ export default function SpriteHunterApp() {
           <img className="mobile-brand-icon" src="/spritehunter-icon-192.png" alt="" width="34" height="34" />
           <div className="location-control">
             <MapPin size={18} />
-            <div><span>Θέση παρατήρησης</span><strong>{observer.name}</strong></div>
-            <span className="coordinate">{observer.latitude.toFixed(4)}°, {observer.longitude.toFixed(4)}°</span>
+            <div><span>Θέση παρατήρησης</span><p className="location-line"><strong>{observer.name}</strong><span className="coordinate">{observer.latitude.toFixed(4)}°, {observer.longitude.toFixed(4)}°</span></p></div>
           </div>
           <div className="top-actions">
             <PwaInstallButton />
@@ -636,7 +638,7 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
         <div className="hero-grid">
           <div className="hero-copy">
             <span className={`opportunity-kicker ${selected ? `category-${selected.score.category}` : ""}`}>{loading && !data ? "Σάρωση Μεσογείου…" : error ? t.insufficient : categoryLabel(selected, language)}</span>
-            <h1>{selected ? targetTitle(selected, language) : t.noOpportunity}</h1>
+            <h1>{selected ? targetTitle(selected, language) : !data && !error ? t.scanning : t.noOpportunity}</h1>
             {selected && <p className="hero-valid-time">{selected.source === "observed" ? <><Zap size={16} />Παρατήρηση {formatAthens(selected.forecastValidAt, language)} · πριν από {selected.observedLightning?.ageMinutes ?? "—"}′</> : <><CalendarClock size={16} />Ισχύει {formatAthens(selected.forecastValidAt, language)} · {relativeHours(selected.forecastValidAt, referenceTime)}</>}</p>}
             <p>{selected ? targetDescription(selected) : "Η εφαρμογή θα συνεχίσει να ελέγχει πραγματικά προγνωστικά δεδομένα και κεραυνούς MTG-LI. Δεν δημιουργούνται τεχνητές καταιγίδες όταν δεν υπάρχει σήμα."}</p>
             {error && <div className="inline-error"><AlertTriangle size={17} />{error}</div>}
@@ -732,7 +734,47 @@ function MapView({ candidates, selected, observer, radar, radarVisible, lightnin
 }
 
 function ForecastView({ candidates, selected, onSelect, onPoint }: { candidates: StormCandidate[]; selected: StormCandidate | null; onSelect: (id: string) => void; onPoint: () => void }) {
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">NEXT 48 HOURS</span><h1>Ευκαιρίες</h1><p>Καταιγίδες που βλέπει τώρα το MTG-LI και χονδροειδής προγνωστική σάρωση όλων των διευθύνσεων. Οι προγνωστικές θέσεις μπορούν να μετακινηθούν σημαντικά.</p></div><CalendarClock size={30} /></div><section className="panel"><div className="forecast-table"><div className="forecast-head"><span>Έγκυρη ώρα</span><span>Κατεύθυνση</span><span>Απόσταση</span><span>CAPE / Υετός</span><span>Δείκτης</span><span /></div>{candidates.length ? candidates.map((candidate) => <button key={candidate.id} className={selected?.id === candidate.id ? "selected" : ""} onClick={() => onSelect(candidate.id)}><span>{candidate.source === "observed" ? <><Zap size={13} className="observed-icon" />τώρα (MTG-LI)</> : formatAthens(candidate.forecastValidAt)}</span><span>{directionLabel(candidate.bearingDeg, "el")} · {candidate.bearingDeg.toFixed(0)}°</span><span>{candidate.distanceKm.toFixed(0)} km</span><span>{candidate.capeJkg?.toFixed(0) ?? "—"} J/kg · {candidate.precipitationMm?.toFixed(1) ?? "—"} mm</span><strong>{candidate.score.total}/100</strong><ChevronRight size={17} /></button>) : <EmptyState title="Καμία υποψήφια κυψέλη" description="Δεν βρέθηκε συνδυασμός αστάθειας και υετού που να περνά τα αρχικά φίλτρα." />}</div></section>{selected && <section className="panel explanation-panel"><div><span className="eyebrow">WHY THIS SCORE</span><h2>Επεξήγηση δείκτη {selected.score.total}/100</h2></div><div className="score-breakdown">{[["Δραστηριότητα", selected.score.activity, 35], ["Ατμόσφαιρα", selected.score.atmosphere, 30], ["Έδαφος", selected.score.terrain, 20], ["Απόσταση", selected.score.distance, 10], ["Σκοτάδι", selected.score.darkness, 5]].map(([label, value, max]) => <div key={String(label)}><span>{label}</span><div><i style={{ width: `${Number(value) / Number(max) * 100}%` }} /></div><strong>{value}/{max}</strong></div>)}</div><ul className="reason-list">{[...selected.score.reasons, ...selected.score.limitations].map((reason) => <li key={reason}>{reason}</li>)}</ul><button className="primary-action" onClick={onPoint}>Άνοιγμα στόχευσης</button></section>}</div>;
+  const explanationRef = useRef<HTMLElement>(null);
+  // The explanation below the table is what a row click changes; bring it into view,
+  // otherwise the click looked like it did nothing.
+  const choose = (id: string) => {
+    onSelect(id);
+    const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+    requestAnimationFrame(() => explanationRef.current?.scrollIntoView({ behavior, block: "nearest" }));
+  };
+  const parts = selected ? [
+    { label: "Δραστηριότητα", hint: "κεραυνοί MTG-LI ή αστάθεια μοντέλου", value: selected.score.activity, max: 35 },
+    { label: "Ατμόσφαιρα", hint: "νέφωση και ορατότητα στη θέση σου", value: selected.score.atmosphere, max: 30 },
+    { label: "Έδαφος", hint: "ορίζοντας DEM προς τον στόχο", value: selected.score.terrain, max: 20 },
+    { label: "Απόσταση", hint: "ιδανικά 250–550 km", value: selected.score.distance, max: 10 },
+    { label: "Σκοτάδι", hint: "ύψος ήλιου και σελήνη", value: selected.score.darkness, max: 5 },
+  ] : [];
+  return (
+    <div className="view-stack">
+      <div className="view-heading"><div><span className="eyebrow">NEXT 48 HOURS</span><h1>Ευκαιρίες</h1><p>Καταιγίδες που βλέπει τώρα το MTG-LI και χονδροειδής προγνωστική σάρωση όλων των διευθύνσεων. Οι προγνωστικές θέσεις μπορούν να μετακινηθούν σημαντικά. Πάτησε μια γραμμή για την επεξήγηση του δείκτη.</p></div><CalendarClock size={30} /></div>
+      <section className="panel"><div className="forecast-table"><div className="forecast-head"><span>Έγκυρη ώρα</span><span>Κατεύθυνση</span><span>Απόσταση</span><span>CAPE / Υετός</span><span>Δείκτης</span><span /></div>{candidates.length ? candidates.map((candidate) => <button key={candidate.id} className={selected?.id === candidate.id ? "selected" : ""} aria-current={selected?.id === candidate.id ? "true" : undefined} aria-controls="score-explanation" onClick={() => choose(candidate.id)}><span>{candidate.source === "observed" ? <><Zap size={13} className="observed-icon" />τώρα (MTG-LI)</> : formatAthens(candidate.forecastValidAt)}</span><span>{directionLabel(candidate.bearingDeg, "el")} · {candidate.bearingDeg.toFixed(0)}°</span><span>{candidate.distanceKm.toFixed(0)} km</span><span>{candidate.capeJkg?.toFixed(0) ?? "—"} J/kg · {candidate.precipitationMm?.toFixed(1) ?? "—"} mm</span><strong>{candidate.score.total}/100</strong><ChevronDown size={17} /></button>) : <EmptyState title="Καμία υποψήφια κυψέλη" description="Δεν βρέθηκε συνδυασμός αστάθειας και υετού που να περνά τα αρχικά φίλτρα." />}</div></section>
+      {selected && (
+        <section ref={explanationRef} id="score-explanation" className="panel explanation-panel">
+          <div className="explanation-heading">
+            <div>
+              <span className="eyebrow">WHY THIS SCORE</span>
+              <h2>Επεξήγηση δείκτη {selected.score.total}/100</h2>
+              <p>{directionLabel(selected.bearingDeg, "el")} · {selected.bearingDeg.toFixed(0)}° · {selected.distanceKm.toFixed(0)} km · {selected.source === "observed" ? "παρατήρηση MTG-LI τώρα" : `ισχύει ${formatAthens(selected.forecastValidAt)}`}</p>
+            </div>
+            <span className="confidence-chip">{confidenceLabel(selected.score.confidence)} εμπιστοσύνη</span>
+          </div>
+          <div className="score-breakdown">{parts.map((part) => (
+            <div key={part.label}><span><strong>{part.label}</strong><small>{part.hint}</small></span><div className="score-bar"><i style={{ width: `${part.value / part.max * 100}%` }} /></div><b>{part.value}/{part.max}</b></div>
+          ))}</div>
+          <div className="reason-columns">
+            {selected.score.reasons.length > 0 && <div><h3><Check size={15} />Υπέρ του στόχου</h3><ul>{selected.score.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>}
+            {selected.score.limitations.length > 0 && <div className="limitations"><h3><AlertTriangle size={15} />Περιορισμοί</h3><ul>{selected.score.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}</ul></div>}
+          </div>
+          <button className="primary-action" onClick={onPoint}><Crosshair size={18} />Άνοιγμα στόχευσης</button>
+        </section>
+      )}
+    </div>
+  );
 }
 
 function signedAngle(target: number, current: number) {
@@ -880,6 +922,9 @@ function PointView({ candidate, observer, lens, fov, framing, terrain, terrainLo
   </div>;
 }
 
+// A dark outline keeps sky labels readable where they cross grid and frame lines.
+const SKY_LABEL_HALO = { stroke: "#0b1729", strokeWidth: 4, strokeOpacity: 0.85, paintOrder: "stroke" } as const;
+
 function SkyView({ candidate, terrain, fov, lens, orientation, sky, onOrientation }: { candidate: StormCandidate | null; terrain: TerrainProfile | null; fov: { horizontalDeg: number; verticalDeg: number }; lens: LensProfile; orientation: "landscape" | "portrait"; sky: ReturnType<typeof skyState> | null; onOrientation: (value: "landscape" | "portrait") => void }) {
   if (!candidate) return <EmptyState title="Δεν υπάρχει στόχος" description="Η πανοραμική όψη απαιτεί επιλεγμένη προγνωστική κυψέλη." />;
   const low = Math.min(...candidate.pointing.map((point) => point.elevationDeg));
@@ -896,7 +941,7 @@ function SkyView({ candidate, terrain, fov, lens, orientation, sky, onOrientatio
   const rightBearing = (candidate.bearingDeg + sectorWidth / 2) % 360;
   // Elevation labels are drawn inside the SVG so they stay on their grid lines at every width.
   const gridAngles = [0, maxElevation / 2, maxElevation];
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">ANGULAR CAMERA VIEW</span><h1>Ορίζοντας & πραγματικό κάδρο</h1><p>Ο οριζόντιος άξονας είναι αζιμούθιο γύρω από τον στόχο και ο κάθετος πραγματική γωνία ανύψωσης.</p></div><div className="segmented"><button className={orientation === "landscape" ? "active" : ""} onClick={() => onOrientation("landscape")}>Οριζόντια</button><button className={orientation === "portrait" ? "active" : ""} onClick={() => onOrientation("portrait")}>Κάθετα</button></div></div><section className="panel sky-panel"><svg viewBox="0 0 700 300" role="img" aria-label="Γωνιακό κάδρο, ζώνη TLE και κεντρικός ορίζοντας εδάφους"><defs><linearGradient id="skyGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#0a1530" /><stop offset="1" stopColor="#18283b" /></linearGradient><linearGradient id="terrainGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#263b45" /><stop offset="1" stopColor="#101a20" /></linearGradient></defs><rect width="700" height="300" fill="url(#skyGradient)" />{[0, .25, .5, .75, 1].map((ratio) => <line key={ratio} x1="0" x2="700" y1={260 - ratio * 225} y2={260 - ratio * 225} stroke="#7390aa" strokeOpacity=".16" />)}<rect x="70" y={y(Math.min(maxElevation, fov.verticalDeg))} width="560" height={260 - y(Math.min(maxElevation, fov.verticalDeg))} rx="8" fill="none" stroke="#7de4ca" strokeWidth="2" strokeDasharray="7 5" /><line x1="350" x2="350" y1="30" y2="260" stroke="#7de4ca" strokeOpacity=".45" /><rect x={350 - targetWidth / 2} y={y(high)} width={targetWidth} height={Math.max(7, y(low) - y(high))} rx="5" fill="#f04362" fillOpacity=".34" stroke="#ff6d84" /><text x="350" y={Math.max(22, y(high) - 9)} textAnchor="middle" fill="#ffb1be" fontSize="12">TLE 50–90 km</text>{sky && sky.moonAltitudeDeg > 0 && moonX >= 20 && moonX <= 680 && <g transform={`translate(${moonX},${y(sky.moonAltitudeDeg)})`}><circle r="9" fill="#f4dfad" /><text x="14" y="4" fill="#dce8f3" fontSize="11">Σελήνη</text></g>}<rect x="0" y={y(horizon)} width="700" height={300 - y(horizon)} fill="url(#terrainGradient)" /><line x1="0" x2="700" y1={y(horizon)} y2={y(horizon)} stroke="#91a49c" strokeWidth="2" />{gridAngles.map((angle) => <text key={angle} x="8" y={y(angle) - 4} fill="#d3e1eb" fillOpacity=".7" fontSize="11">{angle === 0 ? "0° ορίζοντας" : `${angle}°`}</text>)}<text x="8" y={Math.min(292, y(horizon) + 20)} fill="#b9c8c3" fontSize="11">DEM κεντρικής διεύθυνσης: {terrain?.horizonAngleDeg == null ? "μη διαθέσιμο" : `${terrain.horizonAngleDeg.toFixed(1)}°`}</text></svg><div className="horizon-caption"><span>{directionLabel(leftBearing, "el")} {leftBearing.toFixed(0)}°</span><strong>Στόχος {candidate.bearingDeg.toFixed(1)}°</strong><span>{directionLabel(rightBearing, "el")} {rightBearing.toFixed(0)}°</span></div><div className="sky-key"><span><i className="key-tle" />Θεωρητική ζώνη TLE</span><span><i className="key-fov" />Κάδρο {lens.focalLengthMm} mm</span><span><i className="key-terrain" />Όριο DEM στην κεντρική διεύθυνση</span></div></section><div className="warning-box"><Mountain size={18} /><p><strong>Περιορισμός:</strong> το DEM ελέγχει τη γραμμή προς το κέντρο του στόχου και δεν παριστάνεται πλέον ως ψεύτικο πανοραμικό ανάγλυφο 360°.</p></div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">ANGULAR CAMERA VIEW</span><h1>Ορίζοντας & πραγματικό κάδρο</h1><p>Ο οριζόντιος άξονας είναι αζιμούθιο γύρω από τον στόχο και ο κάθετος πραγματική γωνία ανύψωσης.</p></div><div className="segmented"><button className={orientation === "landscape" ? "active" : ""} onClick={() => onOrientation("landscape")}>Οριζόντια</button><button className={orientation === "portrait" ? "active" : ""} onClick={() => onOrientation("portrait")}>Κάθετα</button></div></div><section className="panel sky-panel"><svg viewBox="0 0 700 300" role="img" aria-label="Γωνιακό κάδρο, ζώνη TLE και κεντρικός ορίζοντας εδάφους"><defs><linearGradient id="skyGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#0a1530" /><stop offset="1" stopColor="#18283b" /></linearGradient><linearGradient id="terrainGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#263b45" /><stop offset="1" stopColor="#101a20" /></linearGradient></defs><rect width="700" height="300" fill="url(#skyGradient)" />{[0, .25, .5, .75, 1].map((ratio) => <line key={ratio} x1="0" x2="700" y1={260 - ratio * 225} y2={260 - ratio * 225} stroke="#7390aa" strokeOpacity=".16" />)}<rect x="70" y={y(Math.min(maxElevation, fov.verticalDeg))} width="560" height={260 - y(Math.min(maxElevation, fov.verticalDeg))} rx="8" fill="none" stroke="#7de4ca" strokeWidth="2" strokeDasharray="7 5" /><line x1="350" x2="350" y1="30" y2="260" stroke="#7de4ca" strokeOpacity=".45" /><rect x={350 - targetWidth / 2} y={y(high)} width={targetWidth} height={Math.max(7, y(low) - y(high))} rx="5" fill="#f04362" fillOpacity=".34" stroke="#ff6d84" /><text x="350" y={Math.max(22, y(high) - 9)} textAnchor="middle" fill="#ffb1be" fontSize="12" {...SKY_LABEL_HALO}>TLE 50–90 km</text>{sky && sky.moonAltitudeDeg > 0 && moonX >= 20 && moonX <= 680 && <g transform={`translate(${moonX},${y(sky.moonAltitudeDeg)})`}><circle r="9" fill="#f4dfad" /><text x="14" y="4" fill="#dce8f3" fontSize="11">Σελήνη</text></g>}<rect x="0" y={y(horizon)} width="700" height={300 - y(horizon)} fill="url(#terrainGradient)" /><line x1="0" x2="700" y1={y(horizon)} y2={y(horizon)} stroke="#91a49c" strokeWidth="2" />{gridAngles.map((angle) => <text key={angle} x="8" y={angle === 0 ? y(0) + 4 : y(angle) - 4} dominantBaseline={angle === 0 ? "hanging" : undefined} fill="#d3e1eb" fillOpacity=".75" fontSize="11" {...SKY_LABEL_HALO}>{angle}°</text>)}<text x="692" y={y(horizon) + 4} dominantBaseline="hanging" textAnchor="end" fill="#b9c8c3" fontSize="11" {...SKY_LABEL_HALO}>Ορίζοντας DEM: {terrain?.horizonAngleDeg == null ? "μη διαθέσιμος" : `${terrain.horizonAngleDeg.toFixed(1)}°`}</text></svg><div className="horizon-caption"><span>{directionLabel(leftBearing, "el")} {leftBearing.toFixed(0)}°</span><strong>Στόχος {candidate.bearingDeg.toFixed(1)}°</strong><span>{directionLabel(rightBearing, "el")} {rightBearing.toFixed(0)}°</span></div><div className="sky-key"><span><i className="key-tle" />Θεωρητική ζώνη TLE</span><span><i className="key-fov" />Κάδρο {lens.focalLengthMm} mm</span><span><i className="key-terrain" />Όριο DEM στην κεντρική διεύθυνση</span></div></section><div className="warning-box"><Mountain size={18} /><p><strong>Περιορισμός:</strong> το DEM ελέγχει τη γραμμή προς το κέντρο του στόχου και δεν παριστάνεται πλέον ως ψεύτικο πανοραμικό ανάγλυφο 360°.</p></div></div>;
 }
 
 function AuroraView({ aurora, loading, lens, observer, forecast }: { aurora: AuroraResponse | null; loading: boolean; lens: LensProfile; observer: SavedLocation; forecast: OpportunityResponse["observerForecast"] }) {
@@ -1011,6 +1056,7 @@ function SettingsView({ observer, range, data, language, eumetsat, radarStatus, 
       <div className="view-heading"><div><span className="eyebrow">SCIENTIFIC CONFIGURATION</span><h1>Ρυθμίσεις & πηγές</h1><p>Οι επιστημονικές παραδοχές είναι ορατές και δεν παρουσιάζονται ως βεβαιότητες.</p></div><Settings size={30} /></div>
       <div className="settings-columns">
         <section className="panel settings-form"><h2>Παρατήρηση</h2><label>Γλώσσα<select value={language} onChange={(event) => onLanguage(event.target.value as Language)}><option value="el">Ελληνικά</option><option value="en">English</option></select></label><div className="two-fields"><label>Ελάχιστη ακτίνα (km)<NumberField min={100} max={800} isValid={(min) => min < range.max} value={range.min} onCommit={(min) => onRange({ ...range, min })} /></label><label>Μέγιστη ακτίνα (km)<NumberField min={100} max={800} isValid={(max) => max > range.min} value={range.max} onCommit={(max) => onRange({ ...range, max })} /></label></div><label>Σημειώσεις ασφάλειας<textarea rows={3} value={observer.safetyNotes} onChange={(event) => onObserver({ ...observer, safetyNotes: event.target.value })} /></label><button className="primary-action" onClick={onRefresh}><RefreshCw size={17} />Εφαρμογή & νέα σάρωση</button></section>
+        <section className="panel assumptions"><h2>Υψομετρικά περιβλήματα</h2>{[["Red Sprites", "50–90 km", "κύριο μοντέλο"], ["Sprite Halos", "70–90 km", "ενημερωτικό"], ["ELVES", "70–100 km", "πειραματικό"], ["Blue Jets", "15–50 km", "πειραματικό"], ["Gigantic Jets", "15–90 km", "πειραματικό"]].map(([name, altitude, status]) => <div key={name}><span><strong>{name}</strong><small>{status}</small></span><b>{altitude}</b></div>)}<p className="data-note">Τα TLE είναι στιγμιαία φαινόμενα πάνω από καταιγίδες και δεν προβλέπονται με βεβαιότητα από κοινά μετεωρολογικά δεδομένα.</p></section>
         <section className="panel data-sources-panel">
           <h2>Πηγές δεδομένων</h2>
           <div className="provider-list detailed"><div><StatusDot status={eumetsat?.status ?? "stale"} /><span><strong>EUMETSAT MTG / MSG</strong><small>{eumetsat?.message ?? "Έλεγχος δημόσιου WMS…"}</small></span></div>{providers.map((provider) => <div key={provider.id}><StatusDot status={provider.status} /><span><strong>{provider.label}</strong><small>{provider.message}</small></span></div>)}</div>
@@ -1027,7 +1073,6 @@ function SettingsView({ observer, range, data, language, eumetsat, radarStatus, 
           <p className="data-note">Δεν προστέθηκε OpenWeather “Historical Lightning”, επειδή δεν βρέθηκε επίσημα τεκμηριωμένο endpoint κεραυνικών παρατηρήσεων. Για την Ελλάδα η εφαρμογή κρατά το δωρεάν MTG-LI ως κύρια live στρώση.</p>
         </section>
         <section className="panel sprite-evidence"><div className="panel-heading"><div><span className="eyebrow">SPRITE EVIDENCE LADDER</span><h2>Τι προσθέτει πραγματική βεβαιότητα</h2></div><Radio size={20} /></div><div className="signal-guide"><article><span>01 · LIVE</span><strong>MTG Lightning Imager</strong><p>Δωρεάν οπτική ανίχνευση συνολικών κεραυνών ανά 5 λεπτά για Ευρώπη. Δεν ξεχωρίζει CG/IC ούτε πολικότητα.</p></article><article><span>02 · POLARITY</span><strong>+CG και charge moment</strong><p>Η θετική πολικότητα είναι χρήσιμη, αλλά το peak current δεν είναι πιθανότητα sprite. Η μεταβολή ροπής φορτίου είναι ισχυρότερος φυσικός δείκτης.</p></article><article><span>03 · VALIDATION</span><strong>NASA Spritacular</strong><p>Χρησιμοποίησέ το για υποβολή και επιστημονική επιβεβαίωση φωτογραφιών με ακριβή ώρα, θέση και κατεύθυνση.</p></article></div><p className="data-note">Δεν υπάρχει επαληθευμένη δωρεάν δημόσια πηγή για Ελλάδα που να παρέχει ταυτόχρονα +CG, peak current και charge moment. Η εφαρμογή δεν κάνει scraping και δεν παρουσιάζει total-lightning ως +CG.</p></section>
-        <section className="panel assumptions"><h2>Υψομετρικά περιβλήματα</h2>{[["Red Sprites", "50–90 km", "κύριο μοντέλο"], ["Sprite Halos", "70–90 km", "ενημερωτικό"], ["ELVES", "70–100 km", "πειραματικό"], ["Blue Jets", "15–50 km", "πειραματικό"], ["Gigantic Jets", "15–90 km", "πειραματικό"]].map(([name, altitude, status]) => <div key={name}><span><strong>{name}</strong><small>{status}</small></span><b>{altitude}</b></div>)}<p className="data-note">Τα TLE είναι στιγμιαία φαινόμενα πάνω από καταιγίδες και δεν προβλέπονται με βεβαιότητα από κοινά μετεωρολογικά δεδομένα.</p></section>
       </div>
     </div>
   );
