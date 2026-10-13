@@ -3,6 +3,7 @@ import { decodePng, type RgbaImage } from "@/lib/png";
 import { InFlight, TtlCache } from "@/lib/bounded-cache";
 import { EUMETSAT_WMS_URL } from "@/lib/providers/eumetsat";
 import { HttpError, fetchWithRetry } from "@/lib/providers/fetch";
+import { tx } from "@/lib/i18n";
 
 export interface GeoBounds {
   west: number;
@@ -252,7 +253,7 @@ export async function fetchLightningObservation(observer: Coordinates, radiusKm:
   const retrievedAt = new Date(nowMs).toISOString();
   const bounds = lightningBounds(observer, radiusKm);
   if (!bounds) {
-    return { status: "unsupported", retrievedAt, latestFrameAt: null, windowMinutes: 0, clusters: [], message: "Η θέση είναι εκτός κάλυψης του MTG-LI (Ευρώπη, Αφρική, Ατλαντικός)." };
+    return { status: "unsupported", retrievedAt, latestFrameAt: null, windowMinutes: 0, clusters: [], message: tx("Η θέση είναι εκτός κάλυψης του MTG-LI (Ευρώπη, Αφρική, Ατλαντικός).", "The location is outside MTG-LI coverage (Europe, Africa, Atlantic).") };
   }
   const key = [bounds.west, bounds.south, bounds.east, bounds.north].join(":");
   const cached = observationCache.get(key, nowMs);
@@ -282,10 +283,19 @@ async function loadObservation(bounds: GeoBounds, key: string, nowMs: number): P
       windowMinutes: frames.length * FRAME_MINUTES,
       clusters,
       message: stale
-        ? `Το τελευταίο καρέ MTG-LI (${utcClock(latest.time)} UTC) είναι παλαιότερο από ${STALE_AFTER_MINUTES} λεπτά· δεν χρησιμοποιείται στη βαθμολογία.`
+        ? tx(
+          `Το τελευταίο καρέ MTG-LI (${utcClock(latest.time)} UTC) είναι παλαιότερο από ${STALE_AFTER_MINUTES} λεπτά· δεν χρησιμοποιείται στη βαθμολογία.`,
+          `The newest MTG-LI frame (${utcClock(latest.time)} UTC) is older than ${STALE_AFTER_MINUTES} minutes and is not used for scoring.`,
+        )
         : clusters.length
-          ? `Το MTG-LI ανιχνεύει ${clusters.length} ${clusters.length === 1 ? "περιοχή" : "περιοχές"} κεραυνών στην ευρύτερη περιοχή (${frames.length} καρέ έως ${utcClock(latest.time)} UTC).`
-          : `Το MTG-LI δεν ανιχνεύει κεραυνούς στην ευρύτερη περιοχή (${frames.length} καρέ έως ${utcClock(latest.time)} UTC).`,
+          ? tx(
+            `Το MTG-LI ανιχνεύει ${clusters.length} ${clusters.length === 1 ? "περιοχή" : "περιοχές"} κεραυνών στην ευρύτερη περιοχή (${frames.length} καρέ έως ${utcClock(latest.time)} UTC).`,
+            `MTG-LI detects ${clusters.length} lightning ${clusters.length === 1 ? "area" : "areas"} in the wider region (${frames.length} frames up to ${utcClock(latest.time)} UTC).`,
+          )
+          : tx(
+            `Το MTG-LI δεν ανιχνεύει κεραυνούς στην ευρύτερη περιοχή (${frames.length} καρέ έως ${utcClock(latest.time)} UTC).`,
+            `MTG-LI detects no lightning in the wider region (${frames.length} frames up to ${utcClock(latest.time)} UTC).`,
+          ),
     };
     observationCache.set(key, value, CACHE_TTL_MS, nowMs);
     return value;
@@ -296,7 +306,10 @@ async function loadObservation(bounds: GeoBounds, key: string, nowMs: number): P
       latestFrameAt: null,
       windowMinutes: 0,
       clusters: [],
-      message: `Οι παρατηρήσεις κεραυνών MTG-LI δεν ήταν διαθέσιμες (${error instanceof Error ? error.message : "άγνωστο σφάλμα"}).`,
+      message: tx(
+        `Οι παρατηρήσεις κεραυνών MTG-LI δεν ήταν διαθέσιμες (${error instanceof Error ? error.message : "άγνωστο σφάλμα"}).`,
+        `MTG-LI lightning observations were unavailable (${error instanceof Error ? error.message : "unknown error"}).`,
+      ),
     };
     observationCache.set(key, value, FAILURE_TTL_MS, nowMs);
     return value;

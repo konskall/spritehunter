@@ -3,7 +3,9 @@ import type {
   AirQualityHour,
   AviationObservation,
   CandidateScoreInput,
+  CgLightning,
   Coordinates,
+  DataStatus,
   LightningCluster,
   LightningObservation,
   ObservedLightning,
@@ -16,9 +18,12 @@ import { skyState } from "@/lib/astronomy";
 import { scoreOpportunity } from "@/lib/scoring";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
 import { InFlight, TtlCache } from "@/lib/bounded-cache";
+import { tx, type Localized } from "@/lib/i18n";
 import { fetchNearestAviationWeather, unavailableAviation } from "@/lib/providers/aviation-weather";
 import { fetchMeteoAlarm, unavailableMeteoAlarm } from "@/lib/providers/meteoalarm";
 import { fetchLightningObservation } from "@/lib/providers/mtg-lightning";
+import { CG_WINDOW_MINUTES, fetchCgLightning, xweatherConfigured, xweatherQuotaAllows } from "@/lib/providers/xweather";
+import { cloudAgreement, fetchOpenWeatherHours, fetchWeatherApiHours, mergeCloudSources, openWeatherConfigured, weatherApiConfigured } from "@/lib/providers/sky-sources";
 
 const numberArray = z.array(z.number().nullable());
 const weatherSchema = z.object({
@@ -62,7 +67,7 @@ const airSchema = z.object({
 
 export type WeatherPayload = z.infer<typeof weatherSchema>;
 const CACHE_TTL_MS = 15 * 60_000;
-const SERVER_ONLY_MESSAGE = "Διαθέσιμο μόνο μέσω του server της εφαρμογής (ο πάροχος δεν επιτρέπει κλήσεις από browser).";
+const SERVER_ONLY_MESSAGE = tx("Διαθέσιμο μόνο μέσω του server της εφαρμογής (ο πάροχος δεν επιτρέπει κλήσεις από browser).", "Available only through the app's server (the provider does not allow browser requests).");
 // Candidates are only searched over the next 48 h; fetching more only slowed the provider.
 const FORECAST_HOURS = 48;
 const CANDIDATE_WINDOW_HOURS = 48;
@@ -78,6 +83,11 @@ interface ForecastBase {
   payloads: WeatherPayload[];
   screeningFailures: number;
   gridSize: number;
+  skySources: { weatherApi: SourceState; openWeather: SourceState };
+}
+interface SourceState {
+  status: DataStatus;
+  message: Localized;
 }
 const forecastCache = new TtlCache<ForecastBase>(100);
 const forecastInFlight = new InFlight<ForecastBase>();
@@ -292,6 +302,7 @@ function scoreInputForHour(
     && Math.abs(new Date(hour.time).getTime() - new Date(aviation.observedAt).getTime()) <= 3 * 60 * 60_000;
   const metarCloud = metarRelevant ? aviation.cloudCoverPercent : null;
   const metarVisibility = metarRelevant ? aviation.visibilityM : null;
+  const agreement = cloudAgreement(observerHour);
   const sky = skyState(new Date(hour.time), observer.latitude, observer.longitude, geometry.initialBearingDeg);
   return {
     capeJkg: hour.capeJkg,
@@ -301,10 +312,13 @@ function scoreInputForHour(
     precipitationMm: hour.precipitationMm,
     thunderCode,
     lightningPotentialJkg,
-    observerCloudPercent: metarCloud ?? observerHour?.cloudCover ?? null,
+    // Total cloud is the median of the configured forecasts; high cloud only Open-Meteo gives.
+    observerCloudPercent: metarCloud ?? observerHour?.cloudConsensus ?? observerHour?.cloudCover ?? null,
     observerHighCloudPercent: observerHour?.cloudCoverHigh ?? null,
     visibilityM: metarVisibility ?? observerHour?.visibilityM ?? null,
     atmosphereSource: metarCloud != null || metarVisibility != null ? "observation" : "forecast",
+    observerCloudSources: agreement.sources,
+    observerCloudSpread: agreement.spread,
     distanceKm: geometry.distanceM / 1000,
     sunAltitudeDeg: sky.sunAltitudeDeg,
     moonInterference: sky.moonInterference,
@@ -483,11 +497,11 @@ function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster
       observedAt: cluster.observedAt,
       validAt: cluster.observedAt,
       retrievedAt: context.fetchedAt,
-      resolution: "Accumulated Flash Area, πλέγμα ~0,04°",
+      resolution: "Accumulated Flash Area, ~0.04° grid",
       status: "available",
       freshnessMinutes: detail.ageMinutes,
       quality: "medium",
-      message: "Παρατηρημένη κεραυνική δραστηριότητα από δορυφόρο· δεν διακρίνει CG/IC ούτε πολικότητα.",
+      message: "Satellite-observed lightning activity; does not distinguish CG/IC or polarity.",
     },
   };
 }
@@ -531,6 +545,39 @@ export function selectTopCandidates(candidates: StormCandidate[], limit = TARGET
   return [...observed, ...rest].sort(byScore);
 }
 
+// Each storm costs one Xweather access (15,000 a month on the current plan), so only
+// observed storms that made the ranked list are checked, best first.
+const CG_STORM_LIMIT = 4;
+// Sprites need a dark sky and daytime scores are capped anyway, so CG is checked only
+// from civil dusk on at the observer.
+const CG_MAX_SUN_ALTITUDE_DEG = -6;
+
+/** Adds Xweather CG polarity to the observed storms among `candidates` and re-scores them. */
+async function addCgLightning(candidates: StormCandidate[], clusters: LightningCluster[]) {
+  const radiusById = new Map(clusters.map((cluster) => [cluster.id, cluster.radiusKm]));
+  const checked = candidates.filter((candidate) => candidate.source === "observed" && candidate.observedLightning).slice(0, CG_STORM_LIMIT);
+  // The radius covers the lit area plus a margin for strokes at its edge.
+  const results = await Promise.allSettled(checked.map((candidate) => fetchCgLightning(candidate.coordinates, (radiusById.get(candidate.id) ?? 30) + 10)));
+  const cgById = new Map<string, CgLightning>();
+  results.forEach((result, index) => { if (result.status === "fulfilled") cgById.set(checked[index].id, result.value); });
+  const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  const enriched = candidates.map((candidate) => {
+    const cg = cgById.get(candidate.id);
+    if (!cg || !candidate.observedLightning) return candidate;
+    const observedLightning = { ...candidate.observedLightning, cg };
+    const scoreInput = { ...candidate.scoreInput, observedLightning };
+    return { ...candidate, observedLightning, scoreInput, score: scoreOpportunity({ ...scoreInput, terrain: "unknown" }) };
+  });
+  return {
+    candidates: enriched.sort(byScore),
+    checked: checked.length,
+    succeeded: cgById.size,
+    error: failure ? (failure.reason instanceof Error ? failure.reason.message : "unknown error") : null,
+  };
+}
+
+const errorDetail = (reason: unknown) => (reason instanceof Error ? reason.message : "unknown error");
+
 const serverOnlyLightning = (retrievedAt: string): LightningObservation => ({
   status: "unavailable", retrievedAt, latestFrameAt: null, windowMinutes: 0, clusters: [], message: SERVER_ONLY_MESSAGE,
 });
@@ -553,12 +600,17 @@ async function fetchForecastBase(cacheKey: string, observer: Coordinates, minimu
   });
 
   const screeningBatches = chunks(grid, SCREENING_BATCH_SIZE);
-  const [observerResult, airResult, aviationResult, alertResult, ...screeningResults] = await Promise.allSettled([
+  const useWeatherApi = serverOnlySources && weatherApiConfigured();
+  const useOpenWeather = serverOnlySources && openWeatherConfigured();
+  const [observerResult, airResult, aviationResult, alertResult, weatherApiResult, openWeatherResult, ...screeningResults] = await Promise.allSettled([
     fetchWeatherBatch([observer]),
     fetchJsonWithRetry<unknown>(`https://air-quality-api.open-meteo.com/v1/air-quality?${airParams}`, { retries: 1, timeoutMs: 10_000, deadlineMs: 15_000 }),
     // AviationWeather and MeteoAlarm send no CORS headers, so the browser fallback skips them.
-    serverOnlySources ? fetchNearestAviationWeather(observer) : Promise.reject(new Error(SERVER_ONLY_MESSAGE)),
-    serverOnlySources ? fetchMeteoAlarm(observer) : Promise.reject(new Error(SERVER_ONLY_MESSAGE)),
+    serverOnlySources ? fetchNearestAviationWeather(observer) : Promise.reject(new Error(SERVER_ONLY_MESSAGE.en)),
+    serverOnlySources ? fetchMeteoAlarm(observer) : Promise.reject(new Error(SERVER_ONLY_MESSAGE.en)),
+    // Keyed sources stay on the server; the browser fallback never has the keys.
+    useWeatherApi ? fetchWeatherApiHours(observer) : Promise.resolve(null),
+    useOpenWeather ? fetchOpenWeatherHours(observer) : Promise.resolve(null),
     ...screeningBatches.map((batch) => fetchWeatherBatch(batch)),
   ]);
 
@@ -568,16 +620,31 @@ async function fetchForecastBase(cacheKey: string, observer: Coordinates, minimu
 
   const fetchedAt = new Date().toISOString();
   const airParsed = airResult.status === "fulfilled" ? airSchema.safeParse(airResult.value) : null;
+  const sourceState = (result: PromiseSettledResult<unknown>, configured: boolean): SourceState => {
+    if (!serverOnlySources) return { status: "unavailable", message: SERVER_ONLY_MESSAGE };
+    if (!configured) return { status: "not_configured", message: tx("Χωρίς κλειδί· η νέφωση της θέσης σου βασίζεται στις υπόλοιπες προγνώσεις.", "No key; cloud at your location comes from the other forecasts.") };
+    return result.status === "fulfilled"
+      ? { status: "available", message: tx("Επιπλέον πρόγνωση νέφωσης για τη θέση σου· η βαθμολογία χρησιμοποιεί τη διάμεσο των πηγών.", "An extra cloud forecast for your location; the score uses the median of the sources.") }
+      : { status: "unavailable", message: tx(`Η πρόγνωση δεν απάντησε (${errorDetail(result.reason)}).`, `The forecast did not respond (${errorDetail(result.reason)}).`) };
+  };
   const value: ForecastBase = {
     fetchedAt,
-    observerForecast: weatherHours(observerResult.value[0]),
+    observerForecast: mergeCloudSources(
+      weatherHours(observerResult.value[0]),
+      weatherApiResult.status === "fulfilled" ? weatherApiResult.value : null,
+      openWeatherResult.status === "fulfilled" ? openWeatherResult.value : null,
+    ),
+    skySources: {
+      weatherApi: sourceState(weatherApiResult, useWeatherApi),
+      openWeather: sourceState(openWeatherResult, useOpenWeather),
+    },
     airQuality: airParsed?.success ? airHours(airParsed.data) : [],
     aviation: aviationResult.status === "fulfilled"
       ? aviationResult.value
-      : unavailableAviation(serverOnlySources ? "Η πραγματική παρατήρηση METAR δεν ήταν διαθέσιμη." : SERVER_ONLY_MESSAGE, fetchedAt),
+      : unavailableAviation(serverOnlySources ? tx("Η πραγματική παρατήρηση METAR δεν ήταν διαθέσιμη.", "The real METAR observation was unavailable.") : SERVER_ONLY_MESSAGE, fetchedAt),
     weatherAlerts: alertResult.status === "fulfilled"
       ? alertResult.value
-      : unavailableMeteoAlarm(serverOnlySources ? "Η επίσημη ροή προειδοποιήσεων δεν ήταν διαθέσιμη." : SERVER_ONLY_MESSAGE, fetchedAt),
+      : unavailableMeteoAlarm(serverOnlySources ? tx("Η επίσημη ροή προειδοποιήσεων δεν ήταν διαθέσιμη.", "The official warnings feed was unavailable.") : SERVER_ONLY_MESSAGE, fetchedAt),
     payloads: screeningResults.flatMap((result) => result.status === "fulfilled" ? result.value : []),
     screeningFailures: screeningResults.filter((result) => result.status === "rejected").length,
     gridSize: grid.length,
@@ -600,9 +667,14 @@ export async function fetchOpportunities(
       : Promise.resolve(serverOnlyLightning(new Date().toISOString())),
   ]);
   const nowMs = Date.now();
-  const { fetchedAt, observerForecast, airQuality, aviation, weatherAlerts, payloads, screeningFailures, gridSize } = base;
+  const { fetchedAt, observerForecast, airQuality, aviation, weatherAlerts, payloads, screeningFailures, gridSize, skySources } = base;
   const allTargets = buildTargets(observer, payloads, rawLightning, { observerHours: observerForecast, aviation, minimumKm, maximumKm, fetchedAt, nowMs });
-  const candidates = selectTopCandidates(allTargets);
+  const xweatherReady = serverOnlySources && xweatherConfigured();
+  const darkEnough = skyState(new Date(nowMs), observer.latitude, observer.longitude, 0).sunAltitudeDeg <= CG_MAX_SUN_ALTITUDE_DEG;
+  const quotaLeft = xweatherQuotaAllows(nowMs);
+  const useXweather = xweatherReady && darkEnough && quotaLeft;
+  const cgCheck = useXweather ? await addCgLightning(selectTopCandidates(allTargets), rawLightning.clusters) : null;
+  const candidates = cgCheck?.candidates ?? selectTopCandidates(allTargets);
   const observedCount = candidates.filter((candidate) => candidate.source === "observed").length;
   // Ages are recomputed per response; the observation itself is cached for a few minutes.
   const lightning: LightningObservation = {
@@ -611,12 +683,22 @@ export async function fetchOpportunities(
     inRangeCount: allTargets.filter((candidate) => candidate.source === "observed").length,
   };
 
-  const xweatherConfigured = typeof process !== "undefined" && Boolean(process.env.XWEATHER_CLIENT_ID && process.env.XWEATHER_CLIENT_SECRET);
+  const xweather: { status: DataStatus; message: Localized } = !xweatherReady
+    ? { status: "not_configured", message: tx("Χωρίς κλειδί. Με κλειδί Xweather η εφαρμογή ελέγχει τους θετικούς κεραυνούς +CG και την ένταση ρεύματος σε κάθε παρατηρημένη καταιγίδα, που είναι ο κύριος εκκινητής των sprites.", "No key. With an Xweather key the app checks positive +CG strokes and their peak current in every observed storm, the main trigger of sprites.") }
+    : !darkEnough
+      ? { status: "available", message: tx("Ρυθμισμένο· οι θετικοί κεραυνοί +CG ελέγχονται μόλις σκοτεινιάσει (ήλιος κάτω από −6°), ώστε να μην ξοδεύονται μονάδες τη μέρα.", "Configured; positive +CG strokes are checked once it is dark (Sun below −6°) so no accesses are spent by day.") }
+    : !quotaLeft
+      ? { status: "stale", message: tx("Το μηνιαίο όριο του Xweather πλησιάζει στο τέλος· οι έλεγχοι +CG σταματούν ως την ανανέωση της περιόδου.", "The monthly Xweather allowance is nearly used up; +CG checks pause until the period resets.") }
+    : !cgCheck?.checked
+      ? { status: "available", message: tx("Ρυθμισμένο· δεν υπάρχει παρατηρημένη καταιγίδα στην ακτίνα σάρωσης για έλεγχο +CG.", "Configured; no observed storm in the scan range to check for +CG.") }
+      : cgCheck.succeeded
+        ? { status: "available", message: tx(`Θετικοί και αρνητικοί κεραυνοί CG με ένταση ρεύματος για ${cgCheck.succeeded} ${cgCheck.succeeded === 1 ? "καταιγίδα" : "καταιγίδες"} (τελευταία ${CG_WINDOW_MINUTES}′).`, `Positive and negative CG strokes with peak current for ${cgCheck.succeeded} ${cgCheck.succeeded === 1 ? "storm" : "storms"} (last ${CG_WINDOW_MINUTES}′).`) }
+        : { status: "unavailable", message: tx(`Το Xweather δεν απάντησε (${cgCheck.error ?? "άγνωστο σφάλμα"}).`, `Xweather did not respond (${cgCheck.error ?? "unknown error"}).`) };
   const screeningStatus = screeningFailures === 0 ? "available" : payloads.length ? "stale" : "unavailable";
   const hasLightningPotential = candidates.some((candidate) => candidate.lightningPotentialJkg != null);
   const screeningMessage = screeningFailures === 0
-    ? `Πρόγνωση θέσης και ${payloads.length} κυψέλες σάρωσης διαθέσιμες.`
-    : `Πρόγνωση θέσης διαθέσιμη· απάντησαν ${payloads.length}/${gridSize} κυψέλες σάρωσης (${screeningFailures} αποτυχίες).`;
+    ? tx(`Πρόγνωση θέσης και ${payloads.length} κυψέλες σάρωσης διαθέσιμες.`, `Observer forecast and ${payloads.length} scan cells available.`)
+    : tx(`Πρόγνωση θέσης διαθέσιμη· απάντησαν ${payloads.length}/${gridSize} κυψέλες σάρωσης (${screeningFailures} αποτυχίες).`, `Observer forecast available; ${payloads.length}/${gridSize} scan cells answered (${screeningFailures} failures).`);
   return {
     observer,
     fetchedAt,
@@ -627,42 +709,38 @@ export async function fetchOpportunities(
     lightning,
     candidates,
     providers: [
-      { id: "open_meteo", label: "Open-Meteo Forecast", status: screeningStatus, checkedAt: fetchedAt, message: screeningMessage },
-      { id: "mtg_li", label: "EUMETSAT MTG-LI κεραυνοί", status: lightning.status, checkedAt: lightning.retrievedAt, message: lightning.message },
+      { id: "open_meteo", label: tx("Open-Meteo Forecast", "Open-Meteo Forecast"), status: screeningStatus, checkedAt: fetchedAt, message: screeningMessage },
+      { id: "mtg_li", label: tx("EUMETSAT MTG-LI κεραυνοί", "EUMETSAT MTG-LI lightning"), status: lightning.status, checkedAt: lightning.retrievedAt, message: lightning.message },
       {
         id: "open_meteo_lpi",
-        label: "Open-Meteo lightning potential",
+        label: tx("Open-Meteo lightning potential", "Open-Meteo lightning potential"),
         status: hasLightningPotential ? "available" : "unsupported",
         checkedAt: fetchedAt,
         message: hasLightningPotential
-          ? "Δωρεάν προγνωστικός δείκτης μοντέλου (J/kg) — όχι παρατηρημένα χτυπήματα κεραυνών."
-          : "Δεν υποστηρίζεται από το επιλεγμένο μοντέλο/την περιοχή· δεν αντικαθίσταται με τεχνητές τιμές.",
+          ? tx("Δωρεάν προγνωστικός δείκτης μοντέλου (J/kg) — όχι παρατηρημένα χτυπήματα κεραυνών.", "Free model forecast index (J/kg), not observed lightning strikes.")
+          : tx("Δεν υποστηρίζεται από το επιλεγμένο μοντέλο/την περιοχή· δεν αντικαθίσταται με τεχνητές τιμές.", "Not supported by the selected model or region; no artificial values are substituted."),
       },
       {
         id: "air_quality",
-        label: "Open-Meteo Air Quality",
+        label: tx("Open-Meteo Air Quality", "Open-Meteo Air Quality"),
         status: airQuality.length ? "available" : "unavailable",
         checkedAt: fetchedAt,
-        message: airQuality.length ? "Πρόγνωση CAMS για σκόνη, AOD και σωματίδια." : "Η πρόγνωση ποιότητας αέρα δεν ήταν διαθέσιμη.",
+        message: airQuality.length ? tx("Πρόγνωση CAMS για σκόνη, AOD και σωματίδια.", "CAMS forecast for dust, AOD and particles.") : tx("Η πρόγνωση ποιότητας αέρα δεν ήταν διαθέσιμη.", "The air-quality forecast was unavailable."),
       },
-      { id: "aviation_weather", label: "AviationWeather METAR / TAF", status: aviation.status, checkedAt: fetchedAt, message: aviation.message },
-      { id: "meteoalarm", label: "MeteoAlarm Ελλάδα", status: weatherAlerts.status, checkedAt: fetchedAt, message: weatherAlerts.message },
-      { id: "rainviewer", label: "RainViewer radar", status: "stale", checkedAt: fetchedAt, message: "Η live κατάσταση ελέγχεται χωριστά στον χάρτη· η κάλυψη είναι best-effort και χωρίς SLA." },
-      {
-        id: "xweather",
-        label: "Vaisala Xweather (προαιρετικό)",
-        status: xweatherConfigured ? "available" : "not_configured",
-        checkedAt: fetchedAt,
-        message: xweatherConfigured ? "Τα credentials έχουν ρυθμιστεί· οι κλήσεις περιορίζονται σε επιλεγμένες περιοχές στόχων." : "Δεν απαιτείται: το δωρεάν MTG-LI τροφοδοτεί ήδη τη βαθμολογία με παρατηρημένους κεραυνούς. Xweather χρειάζεται μόνο για δεδομένα CG/IC, πολικότητας και peak current.",
-      },
-      { id: "terrain", label: "OpenTopoData SRTM", status: "stale", checkedAt: fetchedAt, message: "Το DEM ελέγχεται μόνο κατά την επιλογή στόχου, ώστε να προστατεύεται το δημόσιο quota." },
+      { id: "aviation_weather", label: tx("AviationWeather METAR / TAF", "AviationWeather METAR / TAF"), status: aviation.status, checkedAt: fetchedAt, message: aviation.message },
+      { id: "meteoalarm", label: tx("MeteoAlarm Ελλάδα", "MeteoAlarm Greece"), status: weatherAlerts.status, checkedAt: fetchedAt, message: weatherAlerts.message },
+      { id: "rainviewer", label: tx("RainViewer radar", "RainViewer radar"), status: "stale", checkedAt: fetchedAt, message: tx("Η live κατάσταση ελέγχεται χωριστά στον χάρτη· η κάλυψη είναι best-effort και χωρίς SLA.", "Live status is checked separately on the map; coverage is best-effort with no SLA.") },
+      { id: "xweather", label: tx("Vaisala Xweather +CG", "Vaisala Xweather +CG"), status: xweather.status, checkedAt: fetchedAt, message: xweather.message },
+      { id: "weatherapi", label: tx("WeatherAPI.com νέφωση", "WeatherAPI.com cloud"), status: skySources.weatherApi.status, checkedAt: fetchedAt, message: skySources.weatherApi.message },
+      { id: "openweather", label: tx("OpenWeatherMap νέφωση", "OpenWeatherMap cloud"), status: skySources.openWeather.status, checkedAt: fetchedAt, message: skySources.openWeather.message },
+      { id: "terrain", label: tx("OpenTopoData SRTM", "OpenTopoData SRTM"), status: "stale", checkedAt: fetchedAt, message: tx("Το DEM ελέγχεται μόνο κατά την επιλογή στόχου, ώστε να προστατεύεται το δημόσιο quota.", "The DEM is checked only when a target is selected, to protect the public quota.") },
     ],
     warnings: [
       observedCount
-        ? "Οι στόχοι «παρατηρημένη καταιγίδα» βασίζονται σε πραγματικούς κεραυνούς MTG-LI· οι υπόλοιποι είναι προγνωστικές κυψέλες μοντέλου."
-        : "Οι υποψήφιοι στόχοι είναι προγνωστικές κυψέλες μοντέλου και όχι παρατηρημένες καταιγίδες.",
-      "Ο δείκτης 0–100 είναι ευρετική βαθμολογία ευκαιρίας, όχι ποσοστό πιθανότητας εμφάνισης TLE.",
-      ...(screeningFailures ? ["Μερικά τμήματα της γεωγραφικής σάρωσης δεν απάντησαν. Τα διαθέσιμα δεδομένα εμφανίζονται χωρίς συνθετική συμπλήρωση."] : []),
+        ? tx("Οι στόχοι «παρατηρημένη καταιγίδα» βασίζονται σε πραγματικούς κεραυνούς MTG-LI· οι υπόλοιποι είναι προγνωστικές κυψέλες μοντέλου.", "\"Observed storm\" targets are based on real MTG-LI lightning; the rest are model forecast cells.")
+        : tx("Οι υποψήφιοι στόχοι είναι προγνωστικές κυψέλες μοντέλου και όχι παρατηρημένες καταιγίδες.", "The candidate targets are model forecast cells, not observed storms."),
+      tx("Ο δείκτης 0–100 είναι ευρετική βαθμολογία ευκαιρίας, όχι ποσοστό πιθανότητας εμφάνισης TLE.", "The 0–100 index is a heuristic opportunity score, not a probability of seeing a TLE."),
+      ...(screeningFailures ? [tx("Μερικά τμήματα της γεωγραφικής σάρωσης δεν απάντησαν. Τα διαθέσιμα δεδομένα εμφανίζονται χωρίς συνθετική συμπλήρωση.", "Some parts of the geographic scan did not respond. The available data is shown without synthetic filling.")] : []),
     ],
   };
 }

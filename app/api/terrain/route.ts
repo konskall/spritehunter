@@ -7,6 +7,7 @@ import { numberParam, optionalNumberParam } from "@/lib/api-params";
 import { TtlCache } from "@/lib/bounded-cache";
 import { terrainBearingKey } from "@/lib/terrain";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { tx, unavailableText } from "@/lib/i18n";
 
 const querySchema = z.object({
   lat: numberParam(-90, 90),
@@ -29,7 +30,7 @@ const DISTANCES_KM = [0, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10, 15, 20, 3
 
 export async function GET(request: Request) {
   if (!allowRequest(clientKey(request))) {
-    return NextResponse.json({ error: "Πάρα πολλά αιτήματα εδάφους. Δοκίμασε ξανά σε ένα λεπτό." }, { status: 429, headers: { "Retry-After": "60" } });
+    return NextResponse.json({ error: tx("Πάρα πολλά αιτήματα εδάφους. Δοκίμασε ξανά σε ένα λεπτό.", "Too many terrain requests. Try again in a minute.") }, { status: 429, headers: { "Retry-After": "60" } });
   }
   const url = new URL(request.url);
   const parsed = querySchema.safeParse(Object.fromEntries(url.searchParams));
@@ -73,7 +74,7 @@ export async function GET(request: Request) {
       horizonAngleDeg: angles.length ? Math.max(...angles) : null,
       samples,
       retrievedAt,
-      message: "Sector profile sampled adaptively to 120 km; public DEM data can contain voids and is not a field survey.",
+      message: tx("Προφίλ τομέα με προσαρμοστική δειγματοληψία έως 120 km· τα δημόσια δεδομένα DEM μπορεί να έχουν κενά και δεν είναι τοπογραφική μέτρηση πεδίου.", "Sector profile sampled adaptively to 120 km; public DEM data can contain voids and is not a field survey."),
     };
     cache.set(key, value, CACHE_TTL_MS);
     return NextResponse.json(value, { headers: { "Cache-Control": "public, max-age=86400" } });
@@ -88,8 +89,8 @@ export async function GET(request: Request) {
         samples: [],
         retrievedAt,
         message: error instanceof Error && error.name === "AbortError"
-          ? "Ο πάροχος DEM (OpenTopoData) δεν απάντησε εγκαίρως· ο ορίζοντας παραμένει μη επαληθευμένος."
-          : error instanceof Error ? error.message : "Terrain provider unavailable",
+          ? tx("Ο πάροχος DEM (OpenTopoData) δεν απάντησε εγκαίρως· ο ορίζοντας παραμένει μη επαληθευμένος.", "The DEM provider (OpenTopoData) did not answer in time; the horizon stays unverified.")
+          : unavailableText(error, "Terrain provider unavailable"),
       } satisfies TerrainProfile,
       { status: 502 },
     );

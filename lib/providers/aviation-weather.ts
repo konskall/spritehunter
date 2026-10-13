@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AviationObservation, Coordinates } from "@/lib/domain";
 import { inverseGeodesic } from "@/lib/geodesy";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
+import { tx, type Localized } from "@/lib/i18n";
 
 const cloudSchema = z.object({
   cover: z.string(),
@@ -69,11 +70,12 @@ export function selectAviationReport<T extends StationReport>(reports: T[], obse
 }
 
 function cloudSummary(clouds: z.infer<typeof cloudSchema>[]) {
-  if (!clouds.length) return "Χωρίς δηλωμένες νεφώσεις";
-  return clouds.map((cloud) => `${cloud.cover}${cloud.base == null ? "" : ` ${cloud.base} ft`}${cloud.type ? ` ${cloud.type}` : ""}`).join(" · ");
+  if (!clouds.length) return tx("Χωρίς δηλωμένες νεφώσεις", "No cloud reported");
+  const layers = clouds.map((cloud) => `${cloud.cover}${cloud.base == null ? "" : ` ${cloud.base} ft`}${cloud.type ? ` ${cloud.type}` : ""}`).join(" · ");
+  return tx(layers, layers);
 }
 
-export function unavailableAviation(message: string, retrievedAt = new Date().toISOString()): AviationObservation {
+export function unavailableAviation(message: Localized, retrievedAt = new Date().toISOString()): AviationObservation {
   return {
     status: "unavailable", stationId: null, stationName: null, distanceKm: null,
     observedAt: null, retrievedAt, visibilityM: null, cloudCoverPercent: null,
@@ -101,7 +103,7 @@ export async function fetchNearestAviationWeather(observer: Coordinates): Promis
   });
   const reports = z.array(metarSchema).parse(raw);
   const nearest = selectAviationReport(reports, observer);
-  if (!nearest) return unavailableAviation("Δεν βρέθηκε πρόσφατος σταθμός METAR σε ακτίνα περίπου 280 km.", retrievedAt);
+  if (!nearest) return unavailableAviation(tx("Δεν βρέθηκε πρόσφατος σταθμός METAR σε ακτίνα περίπου 280 km.", "No recent METAR station within about 280 km."), retrievedAt);
   let taf: z.infer<typeof tafSchema> | null = null;
   try {
     const tafRaw = await fetchJsonWithRetry<unknown>(`https://aviationweather.gov/api/data/taf?ids=${encodeURIComponent(nearest.report.icaoId)}&format=json&time=valid`, {
@@ -134,6 +136,9 @@ export async function fetchNearestAviationWeather(observer: Coordinates): Promis
     rawTaf: taf?.rawTAF ?? null,
     tafValidFrom: taf?.validTimeFrom ? new Date(taf.validTimeFrom * 1000).toISOString() : null,
     tafValidTo: taf?.validTimeTo ? new Date(taf.validTimeTo * 1000).toISOString() : null,
-    message: `Πραγματική παρατήρηση ${nearest.report.icaoId}, ${Math.round(nearest.distanceKm)} km μακριά, ηλικίας ${ageMinutes}′. Τοπικό σημείο αναφοράς — όχι μέτρηση ακριβώς στη θέση σου.`,
+    message: tx(
+      `Πραγματική παρατήρηση ${nearest.report.icaoId}, ${Math.round(nearest.distanceKm)} km μακριά, ηλικίας ${ageMinutes}′. Τοπικό σημείο αναφοράς — όχι μέτρηση ακριβώς στη θέση σου.`,
+      `Real observation from ${nearest.report.icaoId}, ${Math.round(nearest.distanceKm)} km away, ${ageMinutes}′ old. A local reference, not a measurement at your exact location.`,
+    ),
   };
 }

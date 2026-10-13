@@ -15,7 +15,8 @@
 
 Ορίζονται στο **Settings → Environment Variables**:
 
-- `XWEATHER_CLIENT_ID`, `XWEATHER_CLIENT_SECRET`: μόνο αν θέλεις τον πληρωμένο πάροχο κεραυνών Xweather. Χωρίς αυτά η εφαρμογή χρησιμοποιεί το δωρεάν MTG-LI.
+- `XWEATHER_CLIENT_ID`, `XWEATHER_CLIENT_SECRET`: θετικοί κεραυνοί +CG και ένταση ρεύματος από το Xweather. Χωρίς αυτά η εφαρμογή χρησιμοποιεί μόνο το δωρεάν MTG-LI.
+- `WEATHERAPI_KEY`, `OPENWEATHER_API_KEY`: δεύτερη και τρίτη πρόγνωση νέφωσης για τη θέση σου. Χωρίς αυτά η νέφωση έρχεται μόνο από το Open-Meteo.
 - `SITE_URL`: η δημόσια διεύθυνση για canonical, Open Graph, `robots.txt` και sitemap. Χρειάζεται μόνο με δικό σου domain· αλλιώς χρησιμοποιείται αυτόματα η διεύθυνση παραγωγής του Vercel.
 
 Μυστικά δεν μπαίνουν ποτέ σε μεταβλητές `NEXT_PUBLIC_`.

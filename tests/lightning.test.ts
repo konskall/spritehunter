@@ -166,7 +166,7 @@ describe("observed lightning in the opportunity score", () => {
     expect(observed.total).toBeGreaterThan(69);
     expect(observed.confidence).toBe("medium");
     expect(scoreOpportunity({ ...base, terrain: "clear", lightning: "observed", observedLightning: detail }).confidence).toBe("high");
-    expect(observed.reasons.some((reason) => reason.includes("MTG-LI"))).toBe(true);
+    expect(observed.reasons.some((reason) => reason.el.includes("MTG-LI"))).toBe(true);
   });
 
   it("rewards larger, more active lightning areas", () => {
@@ -180,13 +180,13 @@ describe("observed lightning in the opportunity score", () => {
     const observed = scoreOpportunity({ ...noModel, lightning: "observed", observedLightning: { ...detail, areaKm2: 17_000 } });
     // Bonus 6 + 10 (area) + 2 (rate) + 1 (persistence) on top of a neutral model term of 8.
     expect(observed.activity).toBe(27);
-    expect(observed.limitations.some((text) => text.includes("μοντέλου"))).toBe(true);
+    expect(observed.limitations.some((text) => text.el.includes("μοντέλου"))).toBe(true);
   });
 
   it("damps a forecast that MTG-LI contradicts right now", () => {
     const contradicted = scoreOpportunity({ ...base, lightning: "not_detected" });
     expect(contradicted.activity).toBeLessThanOrEqual(12);
-    expect(contradicted.limitations.some((text) => text.includes("MTG-LI"))).toBe(true);
+    expect(contradicted.limitations.some((text) => text.el.includes("MTG-LI"))).toBe(true);
   });
 });
 
@@ -219,7 +219,7 @@ describe("forecast and MTG-LI targets together", () => {
     observedAt: "2026-07-15T22:10:00.000Z", ageMinutes: 15, areaKm2: 5_000, maxFlashesPer5Min: 15, frames: 3, windowMinutes: 15,
   });
   const observation = (clusters: ReturnType<typeof cluster>[], status: LightningObservation["status"] = "available"): LightningObservation => ({
-    status, retrievedAt: "2026-07-15T22:24:00.000Z", latestFrameAt: "2026-07-15T22:10:00.000Z", windowMinutes: 15, clusters, message: "",
+    status, retrievedAt: "2026-07-15T22:24:00.000Z", latestFrameAt: "2026-07-15T22:10:00.000Z", windowMinutes: 15, clusters, message: { el: "", en: "" },
   });
   const context = { observerHours, aviation, minimumKm: 200, maximumKm: 600, fetchedAt: "2026-07-15T22:25:00.000Z", nowMs };
 

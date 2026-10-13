@@ -1,4 +1,5 @@
 import type { CameraProfile, LensProfile } from "@/lib/domain";
+import type { Language } from "@/lib/i18n";
 
 const toDeg = (radians: number) => (radians * 180) / Math.PI;
 
@@ -58,20 +59,23 @@ export function framingAssessment(
   };
 }
 
-export function photoRecommendation(lens: LensProfile, moonInterference: boolean, uncertaintyDeg: number) {
+export function photoRecommendation(lens: LensProfile, moonInterference: boolean, uncertaintyDeg: number, language: Language = "el") {
   const narrow = lens.focalLengthMm >= 85;
   const aperture = effectiveMaxAperture(lens);
+  const el = language === "el";
   return {
-    preset: narrow ? "Στοχευμένη λήψη μακρινής καταιγίδας" : "Ευρυγώνια αναζήτηση sprites",
+    preset: narrow
+      ? (el ? "Στοχευμένη λήψη μακρινής καταιγίδας" : "Targeted shot of a distant storm")
+      : (el ? "Ευρυγώνια αναζήτηση sprites" : "Wide-angle sprite search"),
     aperture: `f/${aperture}`,
     iso: moonInterference ? "ISO 1600–3200" : aperture <= 2 ? "ISO 1600–3200" : "ISO 3200–6400",
     shutter: moonInterference ? "1–2 s" : "2–4 s",
-    whiteBalance: "3.500–4.500 K",
+    whiteBalance: el ? "3.500–4.500 K" : "3,500–4,500 K",
     format: "RAW",
-    interval: "1 s ανάμεσα στα καρέ",
+    interval: el ? "1 s ανάμεσα στα καρέ" : "1 s between frames",
     warning:
       narrow || uncertaintyDeg > 8
-        ? "Το κάδρο είναι στενό για την αβεβαιότητα του στόχου· ξεκίνησε με μικρότερη εστιακή απόσταση."
-        : "Το κάδρο καλύπτει την αρχική αναζήτηση· έλεγχε συχνά την κίνηση της καταιγίδας.",
+        ? (el ? "Το κάδρο είναι στενό για την αβεβαιότητα του στόχου· ξεκίνησε με μικρότερη εστιακή απόσταση." : "The frame is narrow for the target's uncertainty; start with a shorter focal length.")
+        : (el ? "Το κάδρο καλύπτει την αρχική αναζήτηση· έλεγχε συχνά την κίνηση της καταιγίδας." : "The frame covers the initial search; check the storm's movement often."),
   };
 }

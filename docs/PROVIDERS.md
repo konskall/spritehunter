@@ -35,13 +35,23 @@
 - Δεν χαρακτηρίζει τον ορίζοντα «επαληθευμένο» όταν λείπουν τιμές DEM.
 - Για παραγωγικό πλήρες 360° profile προτείνεται self-hosted SRTM/Copernicus pipeline με τοπικά cached tiles.
 
-## Vaisala Xweather (προαιρετικό/επί πληρωμή)
+## Vaisala Xweather (προαιρετικό, με κλειδί)
 
-- Endpoint: `/lightning/{lat},{lon}`.
-- Standard περιορισμοί: έως 100 km ακτίνα, έως 1.000 pulses και μόνο τα τελευταία 5 λεπτά. Ιστορικά δεδομένα, μεγάλα polygons ή 24ωρα queries χρειάζονται Enterprise add-on.
-- Το app ζητά lightning μόνο για επιλεγμένη υποψήφια περιοχή. Τα credentials παραμένουν server-side.
-- Η απάντηση επικυρώνεται και κανονικοποιείται σε id, θέση, ώρα, age, IC/CG, peak amplitude/polarity, sensor count και quality metric.
-- Χωρίς credentials το endpoint επιστρέφει `not_configured` και κενό event array.
+- Endpoint: `https://data.api.xweather.com/lightning/summary/{lat},{lon}?radius=…km&filter=cg&from=-15minutes&to=now` (κόστος ×1 ανά κλήση). Δίνει πλήθος CG, θετικούς/αρνητικούς και στατιστικά peak current σε αμπέρ.
+- Το `/lightning/within` για όλη την περιοχή απαιτεί το Lightning Enterprise add-on, γι' αυτό η εφαρμογή ρωτά ανά καταιγίδα.
+- Μόνο τη νύχτα στον παρατηρητή, έως 4 καταιγίδες ανά σάρωση, cache 10 λεπτών. Ο server διαβάζει τα `X-RateLimit-*-Period` headers και σταματά κάτω από 1.000 μονάδες υπόλοιπο (όριο του τρέχοντος λογαριασμού: 15.000 τον μήνα, 100 το λεπτό).
+- Απαιτείται η ένδειξη «Powered by Vaisala Xweather» όπου εμφανίζονται δεδομένα του· η εφαρμογή τη δείχνει δίπλα σε κάθε στοιχείο +CG.
+- Μεταβλητές: `XWEATHER_CLIENT_ID`, `XWEATHER_CLIENT_SECRET` (μόνο στον server).
+
+## WeatherAPI.com (προαιρετικό, με κλειδί)
+
+- Endpoint: `https://api.weatherapi.com/v1/forecast.json?q={lat},{lon}&days=3` (δωρεάν πλάνο). Χρησιμοποιείται μόνο η ωριαία συνολική νέφωση στη θέση του παρατηρητή.
+- Κρατιέται μαζί με την πρόγνωση Open-Meteo 15 λεπτά. Μεταβλητή: `WEATHERAPI_KEY`.
+
+## OpenWeatherMap (προαιρετικό, με κλειδί)
+
+- Endpoint: `https://api.openweathermap.org/data/2.5/forecast?lat=…&lon=…` (δωρεάν πλάνο, βήματα 3 ωρών). Χρησιμοποιείται μόνο η συνολική νέφωση στη θέση του παρατηρητή, για ώρες έως ±90 λεπτά από κάθε βήμα.
+- Κρατιέται μαζί με την πρόγνωση Open-Meteo 15 λεπτά. Μεταβλητή: `OPENWEATHER_API_KEY`.
 
 ## EUMETSAT EUMETView WMS
 
@@ -81,6 +91,7 @@
 | RainViewer public radar | Ναι | Προσωπική/εκπαιδευτική/μικρής κλίμακας χρήση, attribution |
 | OpenTopoData public SRTM | Ναι | Αυστηρό ημερήσιο quota |
 | SunCalc / WGS84 / camera engines | Ναι | Τοπικοί υπολογισμοί |
-| Xweather lightning events | Όχι συνήθως | Απαιτεί subscription/credentials |
+| Xweather +CG (lightning summary) | Με κλειδί | Μηνιαίο όριο μονάδων· η εφαρμογή το προστατεύει |
+| WeatherAPI.com / OpenWeatherMap νέφωση | Δωρεάν πλάνο | Απαιτούν κλειδί |
 | Web Push server, email, scheduler | Εξαρτάται | Hosting και delivery provider |
 

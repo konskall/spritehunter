@@ -1,4 +1,5 @@
 import type { AuroraResponse } from "@/lib/domain";
+import { tx } from "@/lib/i18n";
 
 export type OvationPoint = [longitude: number, latitude: number, probability: number];
 
@@ -38,11 +39,11 @@ export function assessAurora(kp: number | null, coordinates: OvationPoint[], lat
           ? "elevated"
           : "quiet";
   const message = level === "strong"
-    ? "Ισχυρή γεωμαγνητική δραστηριότητα. Έλεγξε τον σκοτεινό βόρειο ορίζοντα, χωρίς εγγύηση ορατότητας."
+    ? tx("Ισχυρή γεωμαγνητική δραστηριότητα. Έλεγξε τον σκοτεινό βόρειο ορίζοντα, χωρίς εγγύηση ορατότητας.", "Strong geomagnetic activity. Check the dark northern horizon; visibility is not guaranteed.")
     : level === "possible"
-      ? "Υπάρχει ένδειξη αυξημένης δραστηριότητας βόρεια. Η Ελλάδα παραμένει οριακή τοποθεσία."
+      ? tx("Υπάρχει ένδειξη αυξημένης δραστηριότητας βόρεια. Η Ελλάδα παραμένει οριακή τοποθεσία.", "There are signs of increased activity to the north. Greece remains a marginal location.")
       : level === "elevated"
-        ? "Αυξημένη δραστηριότητα, αλλά συνήθως ανεπαρκής για φωτογραφικό σέλας από την Ελλάδα."
-        : "Δεν υπάρχει τώρα αξιόπιστη ένδειξη σέλαος για τη θέση παρατήρησης.";
+        ? tx("Αυξημένη δραστηριότητα, αλλά συνήθως ανεπαρκής για φωτογραφικό σέλας από την Ελλάδα.", "Elevated activity, but usually not enough for a photographic aurora from Greece.")
+        : tx("Δεν υπάρχει τώρα αξιόπιστη ένδειξη σέλαος για τη θέση παρατήρησης.", "No reliable sign of aurora for the observing site right now.");
   return { localProbabilityPercent: local, northernSectorProbabilityPercent: northern, level, message };
 }

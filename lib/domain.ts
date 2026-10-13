@@ -1,3 +1,5 @@
+import type { Localized } from "@/lib/i18n";
+
 export type DataStatus =
   | "available"
   | "stale"
@@ -44,6 +46,16 @@ export interface WeatherHour {
   liftedIndex: number | null;
   precipitableWaterKgM2: number | null;
   weatherCode: number | null;
+  /** Total cloud for this hour from each forecast source, when its key is configured. */
+  cloudSources?: CloudSources;
+  /** Median total cloud of the available sources (equals `cloudCover` with Open-Meteo alone). */
+  cloudConsensus?: number | null;
+}
+
+export interface CloudSources {
+  openMeteo: number | null;
+  weatherApi: number | null;
+  openWeather: number | null;
 }
 
 export interface AirQualityHour {
@@ -69,8 +81,8 @@ export interface ScoreBreakdown {
   total: number;
   confidence: "high" | "medium" | "low" | "insufficient";
   category: "poor" | "low" | "possible" | "promising" | "very_promising";
-  reasons: string[];
-  limitations: string[];
+  reasons: Localized[];
+  limitations: Localized[];
 }
 
 /** Lightning that EUMETSAT MTG-LI observed at (or near) a target. */
@@ -87,6 +99,22 @@ export interface ObservedLightning {
   /** Number of sampled 5-minute frames in which the storm was lit. */
   frames: number;
   windowMinutes: number;
+  /** Cloud-to-ground strokes and their polarity from Vaisala Xweather, when configured. */
+  cg?: CgLightning | null;
+}
+
+/**
+ * Cloud-to-ground lightning in an observed storm over the last minutes. Sprites are
+ * triggered mostly by large positive CG strokes, which MTG-LI cannot tell apart.
+ */
+export interface CgLightning {
+  windowMinutes: number;
+  cgCount: number;
+  positiveCount: number;
+  negativeCount: number;
+  /** Peak current of the strongest positive stroke in kA, when reported. */
+  maxPositiveKa: number | null;
+  retrievedAt: string;
 }
 
 export interface LightningCluster extends ObservedLightning {
@@ -103,7 +131,7 @@ export interface LightningObservation {
   clusters: LightningCluster[];
   /** Observed storms inside the scan range (set per scan; clusters cover a wider box). */
   inRangeCount?: number;
-  message: string;
+  message: Localized;
 }
 
 /** Everything the opportunity score needs except terrain, which is verified later per target. */
@@ -119,6 +147,9 @@ export interface CandidateScoreInput {
   observerHighCloudPercent: number | null;
   visibilityM: number | null;
   atmosphereSource?: "observation" | "forecast";
+  /** How many independent forecasts gave the observer's total cloud, and how far apart they were. */
+  observerCloudSources?: number;
+  observerCloudSpread?: number | null;
   distanceKm: number;
   sunAltitudeDeg: number;
   moonInterference: boolean;
@@ -155,11 +186,11 @@ export interface StormCandidate {
 }
 
 export interface ProviderHealth {
-  id: "open_meteo" | "open_meteo_lpi" | "mtg_li" | "air_quality" | "aviation_weather" | "meteoalarm" | "rainviewer" | "xweather" | "terrain";
-  label: string;
+  id: "open_meteo" | "open_meteo_lpi" | "mtg_li" | "air_quality" | "aviation_weather" | "meteoalarm" | "rainviewer" | "xweather" | "weatherapi" | "openweather" | "terrain";
+  label: Localized;
   status: DataStatus;
   checkedAt: string;
-  message: string;
+  message: Localized;
 }
 
 export interface AuroraResponse {
@@ -171,7 +202,7 @@ export interface AuroraResponse {
   localProbabilityPercent: number | null;
   northernSectorProbabilityPercent: number | null;
   level: "quiet" | "elevated" | "possible" | "strong" | "unknown";
-  message: string;
+  message: Localized;
 }
 
 export interface EumetsatMetadata {
@@ -182,7 +213,7 @@ export interface EumetsatMetadata {
   cloudTopTime: string | null;
   kIndexTime: string | null;
   liftedIndexTime: string | null;
-  message: string;
+  message: Localized;
 }
 
 export interface AviationObservation {
@@ -194,7 +225,7 @@ export interface AviationObservation {
   retrievedAt: string;
   visibilityM: number | null;
   cloudCoverPercent: number | null;
-  cloudSummary: string | null;
+  cloudSummary: Localized | null;
   windDirectionDeg: number | null;
   windSpeedKmh: number | null;
   weather: string | null;
@@ -203,7 +234,7 @@ export interface AviationObservation {
   rawTaf: string | null;
   tafValidFrom: string | null;
   tafValidTo: string | null;
-  message: string;
+  message: Localized;
 }
 
 export interface WeatherAlert {
@@ -224,7 +255,7 @@ export interface WeatherAlertResponse {
   totalCount: number;
   nearbyCount: number;
   alerts: WeatherAlert[];
-  message: string;
+  message: Localized;
 }
 
 export interface OpportunityResponse {
@@ -237,7 +268,7 @@ export interface OpportunityResponse {
   lightning?: LightningObservation;
   candidates: StormCandidate[];
   providers: ProviderHealth[];
-  warnings: string[];
+  warnings: Localized[];
 }
 
 export interface TerrainSample {
@@ -256,7 +287,7 @@ export interface TerrainProfile {
   horizonAngleDeg: number | null;
   samples: TerrainSample[];
   retrievedAt: string;
-  message: string;
+  message: Localized;
 }
 
 export interface SavedLocation extends Coordinates {

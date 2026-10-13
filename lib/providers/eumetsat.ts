@@ -1,4 +1,5 @@
 import type { EumetsatMetadata } from "@/lib/domain";
+import { tx } from "@/lib/i18n";
 
 export const EUMETSAT_WMS_URL = "https://view.eumetsat.int/geoserver/wms";
 export const EUMETSAT_CAPABILITIES_URL = `${EUMETSAT_WMS_URL}?service=WMS&version=1.3.0&request=GetCapabilities`;
@@ -44,8 +45,8 @@ export function parseEumetsatCapabilities(xml: string, retrievedAt = new Date().
     kIndexTime,
     liftedIndexTime,
     message: available
-      ? "EUMETSAT MTG-LI, υπέρυθρα νέφη, ύψος κορυφών και δείκτες αστάθειας διαθέσιμα μέσω του δημόσιου EUMETView WMS."
-      : "Τα αναμενόμενα στρώματα EUMETSAT δεν βρέθηκαν στο EUMETView WMS.",
+      ? tx("EUMETSAT MTG-LI, υπέρυθρα νέφη, ύψος κορυφών και δείκτες αστάθειας διαθέσιμα μέσω του δημόσιου EUMETView WMS.", "EUMETSAT MTG-LI, infrared clouds, cloud-top height and instability indices are available from the public EUMETView WMS.")
+      : tx("Τα αναμενόμενα στρώματα EUMETSAT δεν βρέθηκαν στο EUMETView WMS.", "The expected EUMETSAT layers were not found in the EUMETView WMS."),
   };
 }
 

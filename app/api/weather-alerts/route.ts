@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { fetchMeteoAlarm, unavailableMeteoAlarm } from "@/lib/providers/meteoalarm";
 import { numberParam } from "@/lib/api-params";
+import { unavailableText } from "@/lib/i18n";
 
 const querySchema = z.object({ lat: numberParam(-90, 90), lon: numberParam(-180, 180) });
 
@@ -12,6 +13,6 @@ export async function GET(request: Request) {
   try {
     return NextResponse.json(await fetchMeteoAlarm(observer), { headers: { "Cache-Control": "public, max-age=300, stale-while-revalidate=900" } });
   } catch (error) {
-    return NextResponse.json(unavailableMeteoAlarm(error instanceof Error ? error.message : "MeteoAlarm unavailable"), { status: 502 });
+    return NextResponse.json(unavailableMeteoAlarm(unavailableText(error, "MeteoAlarm unavailable")), { status: 502 });
   }
 }

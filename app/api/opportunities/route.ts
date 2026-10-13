@@ -3,6 +3,7 @@ import { z } from "zod";
 import { fetchOpportunities } from "@/lib/providers/open-meteo";
 import { numberParam, optionalNumberParam } from "@/lib/api-params";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { tx, unavailableText } from "@/lib/i18n";
 
 const querySchema = z.object({
   lat: numberParam(-90, 90),
@@ -16,13 +17,13 @@ const allowRequest = createRateLimiter({ limit: 30, windowMs: 60_000 });
 
 export async function GET(request: Request) {
   if (!allowRequest(clientKey(request))) {
-    return NextResponse.json({ error: "Πάρα πολλές σαρώσεις σε σύντομο χρόνο. Δοκίμασε ξανά σε ένα λεπτό." }, { status: 429, headers: { "Retry-After": "60" } });
+    return NextResponse.json({ error: tx("Πάρα πολλές σαρώσεις σε σύντομο χρόνο. Δοκίμασε ξανά σε ένα λεπτό.", "Too many scans in a short time. Try again in a minute.") }, { status: 429, headers: { "Retry-After": "60" } });
   }
   const url = new URL(request.url);
   const parsed = querySchema.safeParse(Object.fromEntries(url.searchParams));
   if (!parsed.success || parsed.data.minKm >= parsed.data.maxKm) {
     return NextResponse.json(
-      { error: "Μη έγκυρη θέση ή ακτίνα σάρωσης.", details: parsed.success ? "minKm must be below maxKm" : parsed.error.flatten() },
+      { error: tx("Μη έγκυρη θέση ή ακτίνα σάρωσης.", "Invalid location or scan radius."), details: parsed.success ? "minKm must be below maxKm" : parsed.error.flatten() },
       { status: 400 },
     );
   }
@@ -37,7 +38,7 @@ export async function GET(request: Request) {
     return NextResponse.json(data, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Forecast provider failed", status: "unavailable", checkedAt: new Date().toISOString() },
+      { error: unavailableText(error, "Forecast provider failed"), status: "unavailable", checkedAt: new Date().toISOString() },
       { status: 502 },
     );
   }

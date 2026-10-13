@@ -4,6 +4,7 @@ import { fetchJsonWithRetry } from "@/lib/providers/fetch";
 import { numberParam } from "@/lib/api-params";
 import { TtlCache } from "@/lib/bounded-cache";
 import { assessAurora, parseOvationCoordinates, type OvationPoint } from "@/lib/providers/aurora";
+import { unavailableText } from "@/lib/i18n";
 
 const querySchema = z.object({
   lat: numberParam(-90, 90),
@@ -79,7 +80,7 @@ export async function GET(request: Request) {
       localProbabilityPercent: null,
       northernSectorProbabilityPercent: null,
       level: "unknown",
-      message: error instanceof Error ? error.message : "NOAA SWPC data unavailable",
+      message: unavailableText(error, "NOAA SWPC data unavailable"),
     }, { status: 502 });
   }
 }

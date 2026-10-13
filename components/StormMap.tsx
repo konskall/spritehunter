@@ -7,6 +7,7 @@ import { LocateFixed, Minus, Plus } from "lucide-react";
 import type { Coordinates, EumetsatMetadata, StormCandidate } from "@/lib/domain";
 import { destinationPoint } from "@/lib/geodesy";
 import { eumetsatImageUrl, worldPixelToMercator, type EumetsatProduct } from "@/lib/providers/eumetsat";
+import type { Language } from "@/lib/i18n";
 
 interface RadarMetadata {
   host: string;
@@ -25,6 +26,7 @@ interface StormMapProps {
   instabilityVisible: boolean;
   ringsVisible: boolean;
   eumetsat: EumetsatMetadata | null;
+  language: Language;
   onSelect: (id: string) => void;
 }
 
@@ -66,20 +68,21 @@ function worldCoordinates(x: number, y: number, zoom: number): Coordinates {
   return { latitude, longitude };
 }
 
-const athensTime = (date: Date) => new Intl.DateTimeFormat("el-GR", { timeZone: "Europe/Athens", hour: "2-digit", minute: "2-digit" }).format(date);
+const athensTime = (date: Date, language: Language) => new Intl.DateTimeFormat(language === "el" ? "el-GR" : "en-GB", { timeZone: "Europe/Athens", hour: "2-digit", minute: "2-digit" }).format(date);
 
-function radarLabel(radar: RadarMetadata | null) {
+function radarLabel(radar: RadarMetadata | null, language: Language) {
   const timestamp = radar?.radar.past.at(-1)?.time;
-  if (!timestamp) return "Radar μη διαθέσιμο";
-  return `Radar ${athensTime(new Date(timestamp * 1000))}`;
+  if (!timestamp) return language === "el" ? "Radar μη διαθέσιμο" : "Radar unavailable";
+  return `Radar ${athensTime(new Date(timestamp * 1000), language)}`;
 }
 
-function satelliteLabel(eumetsat: EumetsatMetadata | null) {
-  if (!eumetsat?.lightningTime) return "MTG-LI μη διαθέσιμο";
-  return `MTG-LI ${athensTime(new Date(eumetsat.lightningTime))}`;
+function satelliteLabel(eumetsat: EumetsatMetadata | null, language: Language) {
+  if (!eumetsat?.lightningTime) return language === "el" ? "MTG-LI μη διαθέσιμο" : "MTG-LI unavailable";
+  return `MTG-LI ${athensTime(new Date(eumetsat.lightningTime), language)}`;
 }
 
-export default function StormMap({ observer, candidates, selectedId, radar, radarVisible, lightningVisible, infraredVisible, cloudTopVisible, instabilityVisible, ringsVisible, eumetsat, onSelect }: StormMapProps) {
+export default function StormMap({ observer, candidates, selectedId, radar, radarVisible, lightningVisible, infraredVisible, cloudTopVisible, instabilityVisible, ringsVisible, eumetsat, language, onSelect }: StormMapProps) {
+  const t = (el: string, en: string) => (language === "el" ? el : en);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerX: number; pointerY: number; centerX: number; centerY: number } | null>(null);
   const pointersRef = useRef(new Map<number, { x: number; y: number }>());
@@ -316,8 +319,8 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
     <div
       ref={containerRef}
       className="storm-map tile-map"
-      aria-label="Διαδραστικός χάρτης υποψήφιων καταιγίδων"
-      aria-description="Μεγέθυνση με τα κουμπιά, τη ροδέλα ή διπλό πάτημα. Σε οθόνη αφής ο χάρτης μετακινείται με δύο δάχτυλα."
+      aria-label={t("Διαδραστικός χάρτης υποψήφιων καταιγίδων", "Interactive map of candidate storms")}
+      aria-description={t("Μεγέθυνση με τα κουμπιά, τη ροδέλα ή διπλό πάτημα. Σε οθόνη αφής ο χάρτης μετακινείται με δύο δάχτυλα.", "Zoom with the buttons, the wheel or a double tap. On a touch screen move the map with two fingers.")}
       tabIndex={0}
       onPointerDown={pointerDown}
       onPointerMove={pointerMove}
@@ -350,7 +353,7 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
         {candidates.map((candidate) => {
           const point = scene.project(candidate.coordinates);
           const selectedCandidate = candidate.id === selectedId;
-          return <g key={candidate.id} data-map-interactive className={`candidate-marker ${selectedCandidate ? "selected" : ""} ${candidate.observedLightning ? "observed" : ""}`} transform={`translate(${point.x} ${point.y})`} role="button" tabIndex={0} aria-label={`${candidate.source === "observed" ? "Παρατηρημένη καταιγίδα" : "Στόχος"} ${candidate.bearingDeg.toFixed(0)} μοιρών, δείκτης ${candidate.score.total}`} onClick={(event) => { event.stopPropagation(); onSelect(candidate.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(candidate.id); }}><circle className="candidate-halo" r={selectedCandidate ? 19 : 13} /><circle className="candidate-core" r={Math.max(6, candidate.score.total / 9)} /></g>;
+          return <g key={candidate.id} data-map-interactive className={`candidate-marker ${selectedCandidate ? "selected" : ""} ${candidate.observedLightning ? "observed" : ""}`} transform={`translate(${point.x} ${point.y})`} role="button" tabIndex={0} aria-label={t(`${candidate.source === "observed" ? "Παρατηρημένη καταιγίδα" : "Στόχος"} ${candidate.bearingDeg.toFixed(0)} μοιρών, δείκτης ${candidate.score.total}`, `${candidate.source === "observed" ? "Observed storm" : "Target"} at ${candidate.bearingDeg.toFixed(0)} degrees, index ${candidate.score.total}`)} onClick={(event) => { event.stopPropagation(); onSelect(candidate.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(candidate.id); }}><circle className="candidate-halo" r={selectedCandidate ? 19 : 13} /><circle className="candidate-core" r={Math.max(6, candidate.score.total / 9)} /></g>;
         })}
         {/* Labels in their own layer, so no marker drawn later can cover them. */}
         <g className="candidate-labels" aria-hidden="true">
@@ -360,17 +363,17 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
           })}
         </g>
       </svg>
-      {gestureHint && <div className="map-gesture-hint" role="status">Χρησιμοποίησε δύο δάχτυλα για να μετακινήσεις τον χάρτη</div>}
+      {gestureHint && <div className="map-gesture-hint" role="status">{t("Χρησιμοποίησε δύο δάχτυλα για να μετακινήσεις τον χάρτη", "Use two fingers to move the map")}</div>}
       <div className="map-controls" data-map-interactive onPointerDown={(event) => event.stopPropagation()}>
-        <button type="button" onClick={() => changeZoom(1)} disabled={zoom === MAX_ZOOM} aria-label="Μεγέθυνση"><Plus size={17} /></button>
+        <button type="button" onClick={() => changeZoom(1)} disabled={zoom === MAX_ZOOM} aria-label={t("Μεγέθυνση", "Zoom in")}><Plus size={17} /></button>
         <span className="map-zoom-level" aria-live="polite">z{zoom}</span>
-        <button type="button" onClick={() => changeZoom(-1)} disabled={zoom === MIN_ZOOM} aria-label="Σμίκρυνση"><Minus size={17} /></button>
-        <button type="button" onClick={recenter} aria-label="Κεντράρισμα στη θέση παρατήρησης"><LocateFixed size={17} /></button>
+        <button type="button" onClick={() => changeZoom(-1)} disabled={zoom === MIN_ZOOM} aria-label={t("Σμίκρυνση", "Zoom out")}><Minus size={17} /></button>
+        <button type="button" onClick={recenter} aria-label={t("Κεντράρισμα στη θέση παρατήρησης", "Centre on the observing site")}><LocateFixed size={17} /></button>
       </div>
       <div className="map-status">
-        <span>Zoom: κουμπιά · ροδέλα · 2 δάχτυλα</span>
-        {lightningVisible && <span>{lightningOverlay && overlayFailed(lightningOverlay) ? "MTG-LI προσωρινά μη διαθέσιμο (EUMETView)" : lightningOverlay && !loadedOverlays.has(lightningOverlay.src) ? "MTG-LI φορτώνει…" : satelliteLabel(eumetsat)}</span>}
-        <span>{radarVisible ? radarLabel(radar) : "Radar κρυφό"}</span>
+        <span>{t("Zoom: κουμπιά · ροδέλα · 2 δάχτυλα", "Zoom: buttons · wheel · 2 fingers")}</span>
+        {lightningVisible && <span>{lightningOverlay && overlayFailed(lightningOverlay) ? t("MTG-LI προσωρινά μη διαθέσιμο (EUMETView)", "MTG-LI temporarily unavailable (EUMETView)") : lightningOverlay && !loadedOverlays.has(lightningOverlay.src) ? t("MTG-LI φορτώνει…", "MTG-LI loading…") : satelliteLabel(eumetsat, language)}</span>}
+        <span>{radarVisible ? radarLabel(radar, language) : t("Radar κρυφό", "Radar hidden")}</span>
       </div>
     </div>
   );

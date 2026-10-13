@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { fetchEumetsatMetadata } from "@/lib/providers/eumetsat";
+import { unavailableText } from "@/lib/i18n";
 
 export async function GET() {
   try {
@@ -16,7 +17,7 @@ export async function GET() {
         cloudTopTime: null,
         kIndexTime: null,
         liftedIndexTime: null,
-        message: error instanceof Error ? error.message : "EUMETSAT metadata unavailable",
+        message: unavailableText(error, "EUMETSAT metadata unavailable"),
       },
       { status: 502 },
     );

@@ -1,5 +1,6 @@
 import type { Coordinates, WeatherAlert, WeatherAlertResponse } from "@/lib/domain";
 import { inverseGeodesic } from "@/lib/geodesy";
+import { tx, type Localized } from "@/lib/i18n";
 
 const FEED_URL = "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-greece";
 const GREECE_PAGE = "https://meteoalarm.org?region=GR";
@@ -84,12 +85,15 @@ export function parseMeteoAlarmFeed(xml: string, retrievedAt = new Date().toISOS
     nearbyCount,
     alerts,
     message: active.length
-      ? `${active.length} προειδοποιήσεις σε ισχύ ή επικείμενες για την Ελλάδα${observer ? ` · ${nearbyCount} σε περιοχές κοντά στη θέση σου` : ""}. Η εγγύτητα βασίζεται σε προσεγγιστικό κέντρο κάθε περιοχής.`
-      : "Δεν υπάρχουν ενεργές προειδοποιήσεις στη ροή της Ελλάδας.",
+      ? tx(
+        `${active.length} προειδοποιήσεις σε ισχύ ή επικείμενες για την Ελλάδα${observer ? ` · ${nearbyCount} σε περιοχές κοντά στη θέση σου` : ""}. Η εγγύτητα βασίζεται σε προσεγγιστικό κέντρο κάθε περιοχής.`,
+        `${active.length} active or upcoming warnings for Greece${observer ? ` · ${nearbyCount} in regions near you` : ""}. Proximity uses an approximate centre for each region.`,
+      )
+      : tx("Δεν υπάρχουν ενεργές προειδοποιήσεις στη ροή της Ελλάδας.", "No active warnings in the Greece feed."),
   };
 }
 
-export function unavailableMeteoAlarm(message: string, retrievedAt = new Date().toISOString()): WeatherAlertResponse {
+export function unavailableMeteoAlarm(message: Localized, retrievedAt = new Date().toISOString()): WeatherAlertResponse {
   return { status: "unavailable", retrievedAt, updatedAt: null, totalCount: 0, nearbyCount: 0, alerts: [], message };
 }
 

@@ -71,7 +71,7 @@ describe("terrain visibility", () => {
     { altitudeKm: 90, elevationDeg: 8, slantRangeKm: 400 },
   ];
   it("detects partial horizon visibility", () => {
-    const result = terrainVisibility({ status: "available", provider: "test", bearingDeg: 0, observerElevationM: 200, horizonAngleDeg: 4, samples: [], retrievedAt: new Date().toISOString(), message: "" }, envelope);
+    const result = terrainVisibility({ status: "available", provider: "test", bearingDeg: 0, observerElevationM: 200, horizonAngleDeg: 4, samples: [], retrievedAt: new Date().toISOString(), message: { el: "", en: "" } }, envelope);
     expect(result.status).toBe("partial");
     expect(result.visibleAltitudesKm).toEqual([70, 90]);
   });

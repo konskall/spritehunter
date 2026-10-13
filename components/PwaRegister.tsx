@@ -3,6 +3,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { CheckCircle2, Download, Share2, Smartphone, X } from "lucide-react";
+import type { Language } from "@/lib/i18n";
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -60,7 +61,8 @@ export default function PwaRegister() {
   return null;
 }
 
-export function PwaInstallButton() {
+export function PwaInstallButton({ language }: { language: Language }) {
+  const t = (el: string, en: string) => (language === "el" ? el : en);
   // Server snapshot reports "installed" so nothing renders before hydration.
   const installed = useSyncExternalStore(subscribe, isInstalled, () => true);
   const prompt = useSyncExternalStore(subscribe, () => installPrompt, () => null);
@@ -98,9 +100,9 @@ export function PwaInstallButton() {
 
   return (
     <>
-      <button className="icon-button pwa-install-button" type="button" onClick={install} disabled={installing} title="Εγκατάσταση εφαρμογής" aria-label="Εγκατάσταση εφαρμογής" aria-haspopup={!prompt ? "dialog" : undefined}>
+      <button className="icon-button pwa-install-button" type="button" onClick={install} disabled={installing} title={t("Εγκατάσταση εφαρμογής", "Install app")} aria-label={t("Εγκατάσταση εφαρμογής", "Install app")} aria-haspopup={!prompt ? "dialog" : undefined}>
         <Download size={18} />
-        <span>{installing ? "Εγκατάσταση…" : "Εγκατάσταση"}</span>
+        <span>{installing ? t("Εγκατάσταση…", "Installing…") : t("Εγκατάσταση", "Install")}</span>
       </button>
 
       {/* Rendered into <body>: the top bar's backdrop-filter makes it the containing block for
@@ -108,25 +110,25 @@ export function PwaInstallButton() {
       {showHelp && createPortal(
         <div className="pwa-dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowHelp(false); }}>
           <section className="pwa-dialog" role="dialog" aria-modal="true" aria-labelledby="pwa-dialog-title">
-            <button className="pwa-dialog-close" type="button" onClick={() => setShowHelp(false)} aria-label="Κλείσιμο"><X size={18} /></button>
+            <button className="pwa-dialog-close" type="button" onClick={() => setShowHelp(false)} aria-label={t("Κλείσιμο", "Close")}><X size={18} /></button>
             {/* eslint-disable-next-line @next/next/no-img-element -- static PWA icon, not an LCP image */}
             <img src="/spritehunter-icon-192.png" width="64" height="64" alt="" />
             <span className="eyebrow">SPRITEHUNTER PWA</span>
-            <h2 id="pwa-dialog-title">Εγκατάσταση στο κινητό</h2>
+            <h2 id="pwa-dialog-title">{t("Εγκατάσταση στο κινητό", "Install on your phone")}</h2>
             {isIos ? (
               <ol>
-                <li><Share2 size={17} /><span>Άνοιξε το SpriteHunter στο <strong>Safari</strong> και πάτησε «Κοινή χρήση».</span></li>
-                <li><Smartphone size={17} /><span>Επίλεξε <strong>«Προσθήκη στην οθόνη Αφετηρίας»</strong>.</span></li>
-                <li><CheckCircle2 size={17} /><span>Ενεργοποίησε «Άνοιγμα ως εφαρμογή ιστού» και πάτησε <strong>«Προσθήκη»</strong>.</span></li>
+                <li><Share2 size={17} /><span>{t("Άνοιξε το SpriteHunter στο", "Open SpriteHunter in")} <strong>Safari</strong> {t("και πάτησε «Κοινή χρήση».", "and tap “Share”.")}</span></li>
+                <li><Smartphone size={17} /><span>{t("Επίλεξε", "Choose")} <strong>{t("«Προσθήκη στην οθόνη Αφετηρίας»", "“Add to Home Screen”")}</strong>.</span></li>
+                <li><CheckCircle2 size={17} /><span>{t("Ενεργοποίησε «Άνοιγμα ως εφαρμογή ιστού» και πάτησε", "Turn on “Open as Web App” and tap")} <strong>{t("«Προσθήκη»", "“Add”")}</strong>.</span></li>
               </ol>
             ) : (
               <ol>
-                <li><Smartphone size={17} /><span>Άνοιξε το μενού του browser <strong>⋮</strong>.</span></li>
-                <li><Download size={17} /><span>Επίλεξε <strong>«Εγκατάσταση εφαρμογής»</strong> ή «Προσθήκη στην αρχική οθόνη».</span></li>
-                <li><CheckCircle2 size={17} /><span>Επιβεβαίωσε την εγκατάσταση του SpriteHunter.</span></li>
+                <li><Smartphone size={17} /><span>{t("Άνοιξε το μενού του browser", "Open the browser menu")} <strong>⋮</strong>.</span></li>
+                <li><Download size={17} /><span>{t("Επίλεξε", "Choose")} <strong>{t("«Εγκατάσταση εφαρμογής»", "“Install app”")}</strong> {t("ή «Προσθήκη στην αρχική οθόνη».", "or “Add to Home screen”.")}</span></li>
+                <li><CheckCircle2 size={17} /><span>{t("Επιβεβαίωσε την εγκατάσταση του SpriteHunter.", "Confirm the SpriteHunter installation.")}</span></li>
               </ol>
             )}
-            <p>Η εφαρμογή ανοίγει σε αυτόνομο παράθυρο. Το βασικό κέλυφος αποθηκεύεται για offline εκκίνηση, αλλά οι ζωντανοί χάρτες και τα μετεωρολογικά δεδομένα χρειάζονται σύνδεση.</p>
+            <p>{t("Η εφαρμογή ανοίγει σε αυτόνομο παράθυρο. Το βασικό κέλυφος αποθηκεύεται για offline εκκίνηση, αλλά οι ζωντανοί χάρτες και τα μετεωρολογικά δεδομένα χρειάζονται σύνδεση.", "The app opens in its own window. The basic shell is stored for offline start, but live maps and weather data need a connection.")}</p>
           </section>
         </div>,
         document.body,
