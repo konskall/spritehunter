@@ -15,7 +15,6 @@
 
 # next.js
 /.next/
-/.vinext/
 /out/
 
 # misc
@@ -39,22 +38,8 @@ yarn-error.log*
 next-env.d.ts
 *.tsbuildinfo
 
-# Maintained Vite plugin and worker sources.
-!/build/
-/build/*
-!/build/connector-preview-plugin.mjs
-!/build/connector-preview-worker.mjs
-!/build/sites-vite-plugin.LICENSE
-!/build/sites-vite-plugin.ts
-!/build/sites-worker.ts
-
+# local leftovers of the earlier Cloudflare build, and browser-test output
 /dist/
 /.wrangler/
-/.playwright-mcp/
-# Checkout-local execution profile and tool state; never publish them.
 /.sites-runtime/
-/.agents/
-/.codex/
-/outputs/
-/work/
-.preview-*.log
+/.playwright-mcp/

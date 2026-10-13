@@ -122,6 +122,43 @@ function utcIso(value: string) {
   return /(?:Z|[+-]\d\d:\d\d)$/i.test(value) ? value : `${value}Z`;
 }
 
+// Every request re-scores all cells and hours from the cached payloads. Re-parsing the same
+// timestamps each time dominated its CPU time (about 16 of 17 ms), so parsed hours and
+// times are kept alongside the cached arrays they come from.
+const hoursCache = new WeakMap<WeatherPayload, WeatherHour[]>();
+const timesCache = new WeakMap<object, Float64Array>();
+
+function cachedWeatherHours(payload: WeatherPayload) {
+  let hours = hoursCache.get(payload);
+  if (!hours) {
+    hours = weatherHours(payload);
+    hoursCache.set(payload, hours);
+  }
+  return hours;
+}
+
+function timesOf<T>(list: readonly T[], timeOf: (item: T) => string) {
+  let times = timesCache.get(list);
+  if (!times) {
+    times = Float64Array.from(list, (item) => Date.parse(utcIso(timeOf(item))));
+    timesCache.set(list, times);
+  }
+  return times;
+}
+
+/** Index of the time closest to `target` in an ascending series; the earlier one wins a tie. */
+function nearestIndex(times: Float64Array, target: number) {
+  if (!times.length) return -1;
+  let low = 0;
+  let high = times.length - 1;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (times[middle] < target) low = middle + 1;
+    else high = middle;
+  }
+  return low > 0 && target - times[low - 1] <= times[low] - target ? low - 1 : low;
+}
+
 function weatherHours(payload: WeatherPayload): WeatherHour[] {
   return payload.hourly.time.map((time, index) => ({
     time: utcIso(time),
@@ -178,14 +215,8 @@ function weatherUrl(points: Coordinates[]) {
 function lightningPotentialAt(payload: WeatherPayload, time: string) {
   const series = payload.minutely_15;
   if (!series?.lightning_potential?.length) return null;
-  const target = new Date(time).getTime();
-  let closestIndex = -1;
-  let closestDistance = Number.POSITIVE_INFINITY;
-  series.time.forEach((value, index) => {
-    const distance = Math.abs(new Date(utcIso(value)).getTime() - target);
-    if (distance < closestDistance) { closestDistance = distance; closestIndex = index; }
-  });
-  return closestIndex >= 0 ? series.lightning_potential[closestIndex] ?? null : null;
+  const index = nearestIndex(timesOf(series.time, (value) => value), Date.parse(time));
+  return index >= 0 ? series.lightning_potential[index] ?? null : null;
 }
 
 function parseWeatherPayloads(raw: unknown): WeatherPayload[] {
@@ -238,11 +269,8 @@ function emptyHour(time: string): WeatherHour {
 const isThunderCode = (code: number | null) => code != null && [95, 96, 99].includes(code);
 
 function closestHour(hours: WeatherHour[], time: string) {
-  const target = new Date(time).getTime();
-  return hours.reduce<WeatherHour | null>((closest, hour) => {
-    if (!closest) return hour;
-    return Math.abs(new Date(hour.time).getTime() - target) < Math.abs(new Date(closest.time).getTime() - target) ? hour : closest;
-  }, null);
+  const index = nearestIndex(timesOf(hours, (hour) => hour.time), Date.parse(time));
+  return index >= 0 ? hours[index] : null;
 }
 
 function scoreInputForHour(
@@ -312,7 +340,8 @@ export function buildCandidate(
   nowMs = Date.now(),
   lightningCheck: LightningCheck | null = null,
 ): StormCandidate | null {
-  const hours = weatherHours(target);
+  const hours = cachedWeatherHours(target);
+  const times = timesOf(hours, (hour) => hour.time);
   const windowStart = nowMs - 60 * 60_000;
   const coordinates: Coordinates = {
     latitude: target.latitude,
@@ -324,7 +353,7 @@ export function buildCandidate(
   // Score every qualifying hour and keep the best opportunity, so a stronger
   // daytime convective peak (capped at 29 by daylight) cannot hide a usable night.
   const best = hours
-    .filter((hour) => new Date(hour.time).getTime() >= windowStart)
+    .filter((_, index) => times[index] >= windowStart)
     .slice(0, CANDIDATE_WINDOW_HOURS)
     .flatMap((hour) => {
       const cape = hour.capeJkg ?? 0;
@@ -417,7 +446,7 @@ function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster
     .map((payload) => ({ payload, distanceKm: distanceKmBetween(coordinates, payload) }))
     .sort((a, b) => a.distanceKm - b.distanceKm)[0];
   const model = nearest && nearest.distanceKm <= MODEL_CONTEXT_KM ? nearest.payload : null;
-  const modelHour = model ? closestHour(weatherHours(model), cluster.observedAt) : null;
+  const modelHour = model ? closestHour(cachedWeatherHours(model), cluster.observedAt) : null;
   const hour: WeatherHour = { ...(modelHour ?? emptyHour(cluster.observedAt)), time: cluster.observedAt };
   const detail = observedDetail(cluster, nowMs);
   const scoreInput: CandidateScoreInput = {

@@ -1,45 +1,57 @@
 # Deployment
 
-## OpenAI Sites (Vinext / Cloudflare Worker)
-
-Το repository περιλαμβάνει portable Vinext starter και `.openai/hosting.json`. Η εφαρμογή χρησιμοποιεί HTTP `fetch` και δεν απαιτεί raw TCP.
-
-1. Πρόσθεσε server secrets μέσω του Sites environment-variable control plane.
-2. Εκτέλεσε `npm test`, `npm run typecheck`, `npm run lint`, `npm run build`.
-3. Κάνε package/push με το Sites source workflow.
-4. Αποθήκευσε version και κάνε private deploy.
-
-Η αρχική έκδοση λειτουργεί χωρίς D1. Για durable multi-user state, δημιούργησε D1 binding `DB`, ενημέρωσε `.openai/hosting.json`, δημιούργησε migration και εφάρμοσέ την πριν ενεργοποιήσεις routes που καλούν `getDb()`.
+Το SpriteHunter είναι κανονικό Next.js (App Router) project. Η αρχική σελίδα βγαίνει στατική και τα `/api/*` τρέχουν ως serverless functions.
 
 ## Vercel
 
-Το UI και τα Next API routes μπορούν να μεταφερθούν σε standard Next.js App Router project. Επειδή το παρόν checkout είναι Vinext-optimized:
+1. Στο [vercel.com](https://vercel.com) κάνε εγγραφή ή σύνδεση με τον λογαριασμό GitHub.
+2. **Add New… → Project** και επίλεξε το repository `spritehunter` (Import).
+3. Το Vercel αναγνωρίζει μόνο του το Next.js. Άφησε τις προεπιλογές (Build: `npm run build`) και πάτησε **Deploy**.
+4. Η εφαρμογή ανοίγει στο `https://<όνομα-project>.vercel.app`, για παράδειγμα `https://spritehunter.vercel.app` αν το όνομα είναι ελεύθερο. Το όνομα και δικό σου domain αλλάζουν από **Settings → Domains**.
 
-1. Αφαίρεσε τα Sites/Vinext build plugins και χρησιμοποίησε standard `next build`.
-2. Δήλωσε `XWEATHER_CLIENT_ID` και `XWEATHER_CLIENT_SECRET` ως encrypted server variables.
-3. Για PostgreSQL πρόσθεσε `DATABASE_URL` και Drizzle PostgreSQL driver.
-4. Όρισε server cache/revalidation ανά provider και region.
-5. Για προγραμματισμένο monitoring πρόσθεσε Vercel Cron προς authenticated route με `CRON_SECRET`.
+Μετά από αυτό, κάθε push στο `main` ανεβαίνει αυτόματα σε παραγωγή, ενώ κάθε άλλο branch ή pull request παίρνει δική του preview διεύθυνση.
+
+### Μεταβλητές περιβάλλοντος (προαιρετικές)
+
+Ορίζονται στο **Settings → Environment Variables**:
+
+- `XWEATHER_CLIENT_ID`, `XWEATHER_CLIENT_SECRET`: μόνο αν θέλεις τον πληρωμένο πάροχο κεραυνών Xweather. Χωρίς αυτά η εφαρμογή χρησιμοποιεί το δωρεάν MTG-LI.
+- `SITE_URL`: η δημόσια διεύθυνση για canonical, Open Graph, `robots.txt` και sitemap. Χρειάζεται μόνο με δικό σου domain· αλλιώς χρησιμοποιείται αυτόματα η διεύθυνση παραγωγής του Vercel.
+
+Μυστικά δεν μπαίνουν ποτέ σε μεταβλητές `NEXT_PUBLIC_`.
+
+## GitHub Actions
+
+Το `.github/workflows/ci.yml` τρέχει lint, tests και production build σε κάθε push και pull request. Το deploy το κάνει η σύνδεση Vercel–GitHub, όχι το workflow.
+
+## Τοπικά
+
+```bash
+npm ci
+npm run dev                  # http://localhost:3000 με hot reload
+npm run build && npm start   # production build στο http://localhost:3000
+```
+
+Μην τρέχεις `npm run build` ενώ τρέχει το `npm start`: το build ξαναγράφει τον φάκελο `.next` που σερβίρει ο server.
 
 ## Web Push / email / scheduled monitoring
 
 Η τρέχουσα έκδοση δεν ισχυρίζεται ότι παρακολουθεί όταν το browser tab είναι κλειστό. Για παραγωγικό Phase 6 απαιτούνται:
 
-- Durable push subscription table (υπάρχει schema).
+- Βάση δεδομένων για τις push subscriptions.
 - VAPID public/private keys.
 - Authenticated server endpoint εγγραφής/διαγραφής subscription.
-- Scheduled Worker/Cron με quota-aware adaptive polling.
+- Vercel Cron προς authenticated route (`CRON_SECRET`) με quota-aware adaptive polling.
 - Deduplication/cooldown σε database transaction.
 - Email delivery provider και verified sender, αν ενεργοποιηθεί email.
 
-Μην ενεργοποιήσεις polling 2–5 λεπτών χωρίς πραγματική storm trigger και έλεγχο Xweather quota/cost.
+Μην ενεργοποιήσεις polling 2–5 λεπτών χωρίς πραγματική storm trigger και έλεγχο quota/κόστους των παρόχων.
 
 ## Παραγωγικοί έλεγχοι
 
 - HTTPS, CSP και περιορισμός origins όπου είναι εφικτό.
 - Server rate limiting στα provider proxies.
 - Παρακολούθηση provider latency/errors και cache hit rate.
-- Επιβεβαίωση attribution/terms πριν από δημόσια ή εμπορική χρήση.
+- Επιβεβαίωση attribution/terms πριν από δημόσια ή εμπορική χρήση (το δωρεάν πλάνο Hobby του Vercel είναι για μη εμπορική χρήση).
 - Έλεγχος iOS PWA install + Notification API capability σε πραγματική συσκευή.
 - Self-hosted/cached DEM για πλήρες 360° terrain profile χωρίς δημόσιο quota.
-

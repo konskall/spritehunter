@@ -1,10 +1,3 @@
-import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
-
-export function cn(...inputs: ClassValue[]): string {
-  return twMerge(clsx(inputs));
-}
-
 /**
  * Random id for saved items. crypto.randomUUID exists only in secure contexts (HTTPS,
  * localhost) and newer browsers, so testing over plain HTTP on a phone used to crash.

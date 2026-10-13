@@ -25,21 +25,21 @@ Mobile-first PWA για πρακτικό σχεδιασμό παρατήρηση
 - In-app/browser ειδοποιήσεις όσο η εφαρμογή είναι ανοιχτή (επανέλεγχος ανά 15 λεπτά) με όριο δείκτη, ελάχιστη εμπιστοσύνη, cooldown και ώρες ησυχίας.
 - PWA service worker για offline app shell. Οι ζωντανές API κλήσεις παραμένουν network-only.
 - Συμβατότητα κινητών/PWA: περιθώρια για notch και status bar (iOS «black-translucent», Android edge-to-edge), διάταξη κινητού και σε οριζόντια θέση, χάρτης με ένα δάχτυλο για κύλιση σελίδας και δύο για μετακίνηση/zoom, έλεγχος σε Chromium και WebKit (iPhone/iPad).
-- 100 unit tests για γεωδαισία, καμπυλότητα, ορίζοντα, FOV, προσανατολισμό συσκευής, WMM, αστρονομία, DST, επιλογή στόχου, scoring, METAR, MeteoAlarm, αποκωδικοποίηση PNG, ομαδοποίηση κεραυνών MTG-LI, ειδοποιήσεις, cache, rate limiting, επικύρωση εισόδων και cache headers του API.
+- 102 unit tests για γεωδαισία, καμπυλότητα, ορίζοντα, FOV, προσανατολισμό συσκευής, WMM, αστρονομία, DST, επιλογή στόχου, scoring, METAR, MeteoAlarm, αποκωδικοποίηση PNG, ομαδοποίηση κεραυνών MTG-LI, ειδοποιήσεις, cache, rate limiting, επικύρωση εισόδων και cache headers του API.
 
 ## Γρήγορη εκκίνηση
 
 Απαιτείται Node.js `>=22.13`.
 
 ```bash
-npm install
+npm ci
 copy .env.example .env.local
 npm run dev
 ```
 
-Στο portable profile η εφαρμογή ανοίγει συνήθως στο `http://127.0.0.1:5173`.
+Η εφαρμογή ανοίγει στο `http://localhost:3000`. Για production build τοπικά: `npm run build` και μετά `npm start`.
 
-Έλεγχοι παραγωγής:
+Έλεγχοι παραγωγής (τους ίδιους τρέχει το GitHub Actions σε κάθε push):
 
 ```bash
 npm run typecheck
@@ -47,6 +47,10 @@ npm run lint
 npm test
 npm run build
 ```
+
+## Deployment
+
+Το project είναι κανονικό Next.js και ανεβαίνει στο Vercel με σύνδεση του GitHub repository, χωρίς επιπλέον ρυθμίσεις. Κάθε push στο `main` κάνει αυτόματο deploy. Βήματα στον [οδηγό deployment](./docs/DEPLOYMENT.md).
 
 ## Μεταβλητές περιβάλλοντος
 
@@ -59,18 +63,9 @@ XWEATHER_CLIENT_SECRET=...
 
 Μην χρησιμοποιήσεις ποτέ `NEXT_PUBLIC_` για μυστικά παρόχων. Δες το [`.env.example`](./.env.example) και τον [οδηγό παρόχων](./docs/PROVIDERS.md).
 
-## Αποθήκευση και βάση δεδομένων
+## Αποθήκευση
 
-Η παρούσα single-user έκδοση κρατά θέσεις, φακούς, προτιμήσεις και ημερολόγιο σε `localStorage`. Δεν μεταδίδει GPS χωρίς ενέργεια του χρήστη.
-
-Το `db/schema.ts` περιλαμβάνει έτοιμο type-safe Drizzle/D1 σχήμα για θέσεις, παρατηρήσεις, Web Push subscriptions και monitor runs. Για Sites/D1:
-
-1. Δήλωσε binding `DB` στο `.openai/hosting.json` μέσω του hosting control plane.
-2. Εκτέλεσε `npm run db:generate`.
-3. Εφάρμοσε τις migrations σύμφωνα με το [deployment guide](./docs/DEPLOYMENT.md).
-4. Πρόσθεσε authenticated CRUD routes με το σταθερό `oai-authenticated-user-id`.
-
-Για Vercel/PostgreSQL, κράτησε τα ίδια domain interfaces και αντικατάστησε τον D1 driver με `drizzle-orm/node-postgres` ή HTTP-compatible Postgres driver.
+Η παρούσα single-user έκδοση κρατά θέσεις, φακούς, προτιμήσεις και ημερολόγιο σε `localStorage`. Δεν μεταδίδει GPS χωρίς ενέργεια του χρήστη. Δεν χρησιμοποιεί βάση δεδομένων.
 
 ## Αρχιτεκτονική
 
@@ -84,7 +79,6 @@ lib/terrain.ts           visibility classification
 lib/astronomy.ts         SunCalc adapter
 lib/camera.ts            sensor/FOV/framing/settings
 lib/scoring.ts           explainable index + independent confidence
-db/                      προαιρετικό Drizzle persistence schema
 tests/                   scientific unit scenarios
 ```
 
@@ -113,7 +107,7 @@ tests/                   scientific unit scenarios
 
 - [Πάροχοι, άδειες, quotas και κόστος](./docs/PROVIDERS.md)
 - [Επιστημονικές παραδοχές και περιορισμοί](./docs/SCIENTIFIC.md)
-- [Deployment σε Sites ή Vercel](./docs/DEPLOYMENT.md)
+- [Deployment στο Vercel](./docs/DEPLOYMENT.md)
 
 ## Άδεια δεδομένων
 

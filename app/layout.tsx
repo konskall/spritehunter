@@ -1,8 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import PwaRegister from "@/components/PwaRegister";
+import { SITE_URL } from "@/lib/site";
 import "./globals.css";
 
-const SITE_URL = "https://spritehunter-observatory.peppystar32.chatgpt.site";
 const TITLE = "SpriteHunter — Πρόγνωση & φωτογράφιση Red Sprites στην Ελλάδα";
 const DESCRIPTION = "Δωρεάν παρατηρητήριο Red Sprites και TLE: ζωντανοί κεραυνοί EUMETSAT MTG-LI, πρόγνωση καταιγίδων και ακριβής στόχευση κάμερας από την Ελλάδα.";
 

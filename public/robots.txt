@@ -1,5 +1,0 @@
-User-agent: *
-Allow: /
-Disallow: /api/
-
-Sitemap: https://spritehunter-observatory.peppystar32.chatgpt.site/sitemap.xml

@@ -69,6 +69,25 @@ describe("forecast candidate selection", () => {
     expect(candidate!.score.atmosphere).toBe(28);
   });
 
+  it("takes lightning potential from the 15-minute step at the valid hour", () => {
+    const steps = Array.from({ length: 192 }, (_, index) => index);
+    const payload = {
+      ...targetPayload({ 22: { cape: 900, precipitation: 1, code: 95 } }),
+      minutely_15: { time: steps.map((index) => new Date(start + index * 900_000).toISOString().slice(0, 16)), lightning_potential: steps },
+    };
+    const candidate = buildCandidate(sparta, payload, observerHours(0, 0, 30_000), noMetar, "2026-07-15T00:00:00Z", start)!;
+    expect(candidate.forecastValidAt).toBe("2026-07-15T22:00Z");
+    expect(candidate.lightningPotentialJkg).toBe(22 * 4);
+  });
+
+  it("uses the observer forecast for the valid hour", () => {
+    const payload = targetPayload({ 22: { cape: 900, precipitation: 1, code: 95 } });
+    const hours = observerHours(100, 100, 30_000).map((hour, index) => index === 22 ? { ...hour, cloudCover: 50, cloudCoverHigh: 50 } : hour);
+    const candidate = buildCandidate(sparta, payload, hours, noMetar, "2026-07-15T00:00:00Z", start)!;
+    // 20·(1 − 0.50) + 10·(30 000/30 000) = 20; any other hour would give 10.
+    expect(candidate.score.atmosphere).toBe(20);
+  });
+
   it("ignores a stale METAR", () => {
     const payload = targetPayload({ 22: { cape: 900, precipitation: 1, code: 95 } });
     const candidate = buildCandidate(sparta, payload, observerHours(10, 10, 30_000), metar({ status: "stale", cloudCoverPercent: 100, visibilityM: 1_000 }), "2026-07-15T00:00:00Z", start);
