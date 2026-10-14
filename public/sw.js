@@ -1,13 +1,17 @@
-const CACHE = "spritehunter-shell-v5";
+const CACHE = "spritehunter-shell-v6";
 const SHELL = [
   "/",
+  "/en",
   "/offline.html",
   "/manifest.webmanifest",
+  "/spritehunter-icon-128.webp",
   "/spritehunter-icon-192.png",
   "/spritehunter-icon-512.png",
   "/apple-touch-icon.png",
-  "/spritehunter-logo.png",
+  "/spritehunter-logo.webp",
 ];
+// Every deploy adds new hashed scripts; keep the newest entries so the cache cannot grow forever.
+const MAX_ENTRIES = 80;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -35,12 +39,25 @@ self.addEventListener("notificationclick", (event) => {
   );
 });
 
+async function trim(cache) {
+  const keys = await cache.keys();
+  const shell = new Set(SHELL.map((path) => new URL(path, self.location.origin).href));
+  const removable = keys.filter((request) => !shell.has(request.url));
+  // Cache keys come back in insertion order, so the oldest entries go first.
+  await Promise.all(removable.slice(0, Math.max(0, keys.length - MAX_ENTRIES)).map((request) => cache.delete(request)));
+}
+
 // Clone before handing the response to the page: a body that the browser has
 // started reading can no longer be cloned, which made cache updates fail.
 function cacheCopy(request, response) {
   if (!response.ok) return;
   const copy = response.clone();
-  caches.open(CACHE).then((cache) => cache.put(request, copy)).catch(() => undefined);
+  caches.open(CACHE)
+    .then(async (cache) => {
+      await cache.put(request, copy);
+      await trim(cache);
+    })
+    .catch(() => undefined);
 }
 
 self.addEventListener("fetch", (event) => {
@@ -57,7 +74,7 @@ self.addEventListener("fetch", (event) => {
         })
         .catch(async () => (
           await caches.match(request, { ignoreSearch: true })
-          || await caches.match("/")
+          || await caches.match(url.pathname.startsWith("/en") ? "/en" : "/")
           || await caches.match("/offline.html")
         )),
     );

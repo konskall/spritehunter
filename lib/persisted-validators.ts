@@ -1,4 +1,4 @@
-import type { LensProfile, SavedLocation } from "@/lib/domain";
+import type { LensProfile, LogEntry, SavedLocation } from "@/lib/domain";
 import type { AlertPreferences } from "@/lib/notifications";
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
@@ -41,7 +41,20 @@ export function isAlertPrefs(value: unknown): value is AlertPreferences {
     && isClockTime(value.quietEnd);
 }
 
-export const isArray = <T,>(value: unknown): value is T[] => Array.isArray(value);
+export function isLogEntry(entry: unknown): entry is LogEntry {
+  return isRecord(entry)
+    && ["id", "timestamp", "target", "tleType", "lens", "shutter", "notes"].every((key) => typeof entry[key] === "string")
+    && finiteIn(entry.iso, 0, 10_000_000)
+    && finiteIn(entry.aperture, 0, 1_000)
+    && (entry.success === "yes" || entry.success === "no" || entry.success === "uncertain");
+}
+
+/**
+ * Any array is kept: rejecting the list for one malformed entry would reset the stored
+ * logbook to empty. The screen shows only well-formed entries (see isLogEntry).
+ */
+export const isLogList = (value: unknown): value is LogEntry[] => Array.isArray(value);
+
 export const isLanguage = (value: unknown): value is "el" | "en" => value === "el" || value === "en";
 export const isOrientation = (value: unknown): value is "landscape" | "portrait" => value === "landscape" || value === "portrait";
 export const isString = (value: unknown): value is string => typeof value === "string";

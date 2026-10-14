@@ -1,10 +1,14 @@
 export const ATHENS_TIME_ZONE = "Europe/Athens";
+// 24-hour clock in both languages: Greek defaults to 12-hour, which showed 00:05 as "12:05 π.μ."
+// on a night-time app.
+const HOUR_CYCLE = "h23";
 
 export function formatAthens(iso: string | Date, language: "el" | "en" = "el") {
   return new Intl.DateTimeFormat(language === "el" ? "el-GR" : "en-GB", {
     timeZone: ATHENS_TIME_ZONE,
     dateStyle: "short",
     timeStyle: "short",
+    hourCycle: HOUR_CYCLE,
   }).format(typeof iso === "string" ? new Date(iso) : iso);
 }
 
@@ -12,6 +16,7 @@ export function formatAthensTime(iso: string | Date, language: "el" | "en" = "el
   return new Intl.DateTimeFormat(language === "el" ? "el-GR" : "en-GB", {
     timeZone: ATHENS_TIME_ZONE,
     timeStyle: "short",
+    hourCycle: HOUR_CYCLE,
   }).format(typeof iso === "string" ? new Date(iso) : iso);
 }
 

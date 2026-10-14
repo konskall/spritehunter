@@ -18,8 +18,13 @@ export function createRateLimiter({ limit, windowMs, maxKeys = 5_000 }: { limit:
   };
 }
 
+/**
+ * The visitor's IP. Vercel sets x-real-ip and x-forwarded-for itself and drops values sent
+ * by the client, so they cannot be spoofed there. A Cloudflare-only header was read first
+ * before, which any client could set to a new value per request to escape the limits.
+ */
 export function clientKey(request: Request) {
-  return request.headers.get("cf-connecting-ip")
-    ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
-    ?? "anonymous";
+  return request.headers.get("x-real-ip")?.trim()
+    || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    || "anonymous";
 }

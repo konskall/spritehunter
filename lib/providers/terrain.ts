@@ -20,6 +20,30 @@ const DISTANCES_KM = [0, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10, 15, 20, 3
 const MAX_LOCATIONS = 100;
 const BEARINGS_PER_REQUEST = Math.floor(MAX_LOCATIONS / DISTANCES_KM.length);
 const REQUEST_SPACING_MS = 1_100;
+// Each server instance stays under the shared daily limit on its own, so a flood of new
+// locations (the API is public) cannot leave every visitor without terrain checks.
+const DAILY_REQUEST_BUDGET = 800;
+const DAY_MS = 24 * 60 * 60_000;
+const budget = { day: -1, used: 0 };
+let lastRequestAtMs = 0;
+let queue: Promise<void> = Promise.resolve();
+
+class BudgetError extends Error {}
+
+/** Waits for this instance's next DEM slot: one call per second across concurrent requests. */
+function nextDemSlot(): Promise<void> {
+  const slot = queue.then(async () => {
+    const day = Math.floor(Date.now() / DAY_MS);
+    if (budget.day !== day) Object.assign(budget, { day, used: 0 });
+    if (budget.used >= DAILY_REQUEST_BUDGET) throw new BudgetError("DEM daily budget used");
+    const wait = lastRequestAtMs + REQUEST_SPACING_MS - Date.now();
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastRequestAtMs = Date.now();
+    budget.used += 1;
+  });
+  queue = slot.catch(() => undefined);
+  return slot;
+}
 const CACHE_TTL_MS = 7 * 24 * 60 * 60_000;
 const cache = new TtlCache<TerrainProfile>(2_000);
 
@@ -35,13 +59,16 @@ function unavailableProfile(bearing: number, retrievedAt: string, error: unknown
     horizonAngleDeg: null,
     samples: [],
     retrievedAt,
-    message: error instanceof Error && error.name === "AbortError"
-      ? tx("Ο πάροχος DEM (OpenTopoData) δεν απάντησε εγκαίρως· ο ορίζοντας παραμένει μη επαληθευμένος.", "The DEM provider (OpenTopoData) did not answer in time; the horizon stays unverified.")
-      : unavailableText(error, "Terrain provider unavailable"),
+    message: error instanceof BudgetError
+      ? tx("Το ημερήσιο όριο του δημόσιου DEM εξαντλήθηκε· ο ορίζοντας μένει ανεπαλήθευτος ως την επόμενη μέρα.", "The public DEM's daily limit is used up; the horizon stays unverified until the next day.")
+      : error instanceof Error && error.name === "AbortError"
+        ? tx("Ο πάροχος DEM (OpenTopoData) δεν απάντησε εγκαίρως· ο ορίζοντας παραμένει μη επαληθευμένος.", "The DEM provider (OpenTopoData) did not answer in time; the horizon stays unverified.")
+        : unavailableText(error, "Terrain provider unavailable"),
   };
 }
 
 async function fetchChunk(observer: Coordinates, bearings: number[], cameraHeight: number): Promise<TerrainProfile[]> {
+  await nextDemSlot();
   const points = bearings.flatMap((bearing) => DISTANCES_KM.map((distance) => destinationPoint(observer, distance, bearing)));
   const locations = points.map((point) => `${point.latitude.toFixed(6)},${point.longitude.toFixed(6)}`).join("|");
   const retrievedAt = new Date().toISOString();
@@ -83,7 +110,7 @@ async function fetchChunk(observer: Coordinates, bearings: number[], cameraHeigh
 /**
  * DEM horizon profiles for several bearings, so every listed target is scored with the
  * same terrain check. Bearings are whole degrees and cached for a week; only the missing
- * ones are requested, five per DEM call, one call per second.
+ * ones are requested, five per DEM call, one call per second within a daily budget.
  */
 export async function fetchTerrainProfiles(observer: Coordinates, bearingsDeg: number[], cameraHeight: number): Promise<TerrainProfile[]> {
   const bearings = Array.from(new Set(bearingsDeg.map(terrainBearingKey)));
@@ -95,7 +122,6 @@ export async function fetchTerrainProfiles(observer: Coordinates, bearingsDeg: n
     else missing.push(bearing);
   }
   for (let start = 0; start < missing.length; start += BEARINGS_PER_REQUEST) {
-    if (start > 0) await new Promise((resolve) => setTimeout(resolve, REQUEST_SPACING_MS));
     const chunk = missing.slice(start, start + BEARINGS_PER_REQUEST);
     try {
       for (const profile of await fetchChunk(observer, chunk, cameraHeight)) {

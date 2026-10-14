@@ -68,7 +68,7 @@ function worldCoordinates(x: number, y: number, zoom: number): Coordinates {
   return { latitude, longitude };
 }
 
-const athensTime = (date: Date, language: Language) => new Intl.DateTimeFormat(language === "el" ? "el-GR" : "en-GB", { timeZone: "Europe/Athens", hour: "2-digit", minute: "2-digit" }).format(date);
+const athensTime = (date: Date, language: Language) => new Intl.DateTimeFormat(language === "el" ? "el-GR" : "en-GB", { timeZone: "Europe/Athens", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(date);
 
 function radarLabel(radar: RadarMetadata | null, language: Language) {
   const timestamp = radar?.radar.past.at(-1)?.time;

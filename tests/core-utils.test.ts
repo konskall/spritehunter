@@ -97,7 +97,9 @@ describe("rate limiting", () => {
     expect(allow("ip", 1_001)).toBe(true);
   });
   it("identifies clients by the edge-provided address", () => {
-    expect(clientKey(new Request("https://x", { headers: { "cf-connecting-ip": "1.2.3.4" } }))).toBe("1.2.3.4");
+    expect(clientKey(new Request("https://x", { headers: { "x-real-ip": "1.2.3.4", "x-forwarded-for": "5.6.7.8" } }))).toBe("1.2.3.4");
+    // A header the platform does not control must not pick the rate-limit bucket.
+    expect(clientKey(new Request("https://x", { headers: { "cf-connecting-ip": "6.6.6.6", "x-forwarded-for": "5.6.7.8" } }))).toBe("5.6.7.8");
     expect(clientKey(new Request("https://x", { headers: { "x-forwarded-for": "5.6.7.8, 9.9.9.9" } }))).toBe("5.6.7.8");
     expect(clientKey(new Request("https://x"))).toBe("anonymous");
   });

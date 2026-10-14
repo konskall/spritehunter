@@ -12,21 +12,47 @@ export const CG_WINDOW_MINUTES = 15;
 const CACHE_TTL_MS = 10 * 60_000;
 // Calls stop when the subscription period has fewer accesses left than this.
 const QUOTA_RESERVE = 1_000;
+const DAY_MS = 24 * 60 * 60_000;
 
-// Latest allowance reported by Xweather's rate-limit headers.
-const quota: { remaining: number | null; resetAtMs: number | null } = { remaining: null, resetAtMs: null };
+export interface QuotaState {
+  /** Latest allowance left in the period, from Xweather's rate-limit headers. */
+  remaining: number | null;
+  resetAtMs: number | null;
+  /** UTC day of `dayStartRemaining`, and the allowance first seen that day. */
+  day?: number | null;
+  dayStartRemaining?: number | null;
+}
 
-/** False once the period allowance is down to the reserve, until the period resets. */
-export function quotaAllows(state: { remaining: number | null; resetAtMs: number | null }, nowMs: number, reserve = QUOTA_RESERVE) {
-  if (state.remaining == null || state.remaining > reserve) return true;
-  return state.resetAtMs != null && nowMs >= state.resetAtMs;
+const quota: QuotaState = { remaining: null, resetAtMs: null, day: null, dayStartRemaining: null };
+
+/**
+ * False once the period allowance is down to the reserve, until the period resets. Each
+ * UTC day may also spend only an even share of what is left, so a burst of scans (anyone
+ * can call the public API) uses up one day's share at most, not the whole month.
+ */
+export function quotaAllows(state: QuotaState, nowMs: number, reserve = QUOTA_RESERVE) {
+  if (state.remaining == null) return true;
+  if (state.resetAtMs != null && nowMs >= state.resetAtMs) return true;
+  if (state.remaining <= reserve) return false;
+  if (state.dayStartRemaining == null || state.resetAtMs == null || state.day !== Math.floor(nowMs / DAY_MS)) return true;
+  const daysLeft = Math.max(1, Math.ceil((state.resetAtMs - nowMs) / DAY_MS));
+  const dailyShare = (state.dayStartRemaining - reserve) / daysLeft;
+  return state.dayStartRemaining - state.remaining < dailyShare;
 }
 
 export const xweatherQuotaAllows = (nowMs = Date.now()) => quotaAllows(quota, nowMs);
 
-function recordQuota(response: Response) {
+function recordQuota(response: Response, nowMs = Date.now()) {
   const remaining = Number(response.headers.get("x-ratelimit-remaining-period"));
-  if (response.headers.has("x-ratelimit-remaining-period") && Number.isFinite(remaining)) quota.remaining = remaining;
+  if (response.headers.has("x-ratelimit-remaining-period") && Number.isFinite(remaining)) {
+    quota.remaining = remaining;
+    const day = Math.floor(nowMs / DAY_MS);
+    if (quota.day !== day) {
+      // This response already spent one access of the new day.
+      quota.day = day;
+      quota.dayStartRemaining = remaining + 1;
+    }
+  }
   // An HTTP date, e.g. "Fri, 13 Nov 2026 00:00:00 GMT" for a monthly allowance.
   const resetAtMs = Date.parse(response.headers.get("x-ratelimit-reset-period") ?? "");
   if (Number.isFinite(resetAtMs)) quota.resetAtMs = resetAtMs;

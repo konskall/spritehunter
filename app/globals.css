@@ -11,7 +11,8 @@
   --line-strong: rgba(156, 184, 205, 0.26);
   --text: #edf5f9;
   --muted: #91a6b7;
-  --subtle: #62798b;
+  /* 4.5:1 or more on every panel colour (was #62798b, 3.3–4.2:1, for small uppercase labels). */
+  --subtle: #7a91a3;
   --red: #f04362;
   --red-soft: #ff8194;
   --mint: #7de4ca;
@@ -403,7 +404,7 @@ button, a, label, select, [role="button"] { touch-action: manipulation; }
 .aurora-camera .settings-grid { margin-bottom: 16px; }
 .aurora-checklist { padding-left: 18px; color: var(--muted); font-size: 11.5px; line-height: 1.7; }
 .ovation-panel { grid-column: 1 / -1; }
-.ovation-panel .panel-heading a { display: inline-flex; align-items: center; gap: 5px; color: var(--mint); font-size: 11.5px; text-decoration: none; }
+.ovation-panel .panel-heading a { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 0 4px; color: var(--mint); font-size: 11.5px; text-decoration: none; }
 .ovation-panel img { width: min(100%, 780px); max-height: 520px; display: block; margin: 15px auto 0; object-fit: contain; border: 1px solid var(--line); border-radius: 10px; background: #050b10; }
 
 .locations-grid, .equipment-grid, .alerts-grid, .log-grid, .settings-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
@@ -415,6 +416,8 @@ textarea { resize: vertical; }
 input[aria-invalid="true"] { border-color: var(--danger); box-shadow: 0 0 0 1px rgba(255,101,115,.35); }
 input[type="checkbox"] { width: auto; accent-color: var(--red); }
 input[type="range"] { padding: 0; accent-color: var(--red); }
+/* A finger needs more than the 18–22 px default track to grab the thumb. */
+@media (pointer: coarse) { input[type="range"] { min-height: 34px; } }
 .two-fields, .three-fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .three-fields { grid-template-columns: repeat(3, 1fr); }
 .save-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 14px; }
@@ -531,6 +534,7 @@ input[type="range"] { padding: 0; accent-color: var(--red); }
   .pwa-dialog { padding: 20px 16px; border-radius: 15px; }
   .pwa-dialog li { grid-template-columns: 24px 18px 1fr; padding: 10px 9px; }
   .location-control strong { max-width: 165px; }
+  .site-detail { display: none; }
   .icon-button span { display: none; }
   .hero-panel > .eyebrow { padding: 15px 15px 0; }
   .hero-grid { padding: 14px 15px 19px; }
@@ -574,6 +578,11 @@ input[type="range"] { padding: 0; accent-color: var(--red); }
   .aurora-gauge { margin: 0 auto; }
   .aurora-metrics { grid-template-columns: 1fr; text-align: left; }
   .signal-guide { grid-template-columns: 1fr; }
+}
+
+/* The pin already says what the name is; the cut-off "ΘΕΣΗ ΠΑ…" label only took space. */
+@media (max-width: 420px) {
+  .location-control div > span { display: none; }
 }
 
 /* Phones held sideways have little height: slimmer bars leave room for content. */

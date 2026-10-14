@@ -47,6 +47,7 @@ import type {
   DataStatus,
   EumetsatMetadata,
   LensProfile,
+  LogEntry,
   OpportunityResponse,
   SavedLocation,
   StormCandidate,
@@ -64,10 +65,11 @@ import { cameraPointing } from "@/lib/orientation";
 import { parseNumericDraft } from "@/lib/number-input";
 import { rescoreWithTerrain } from "@/lib/scoring";
 import { evaluateAlert, type AlertPreferences } from "@/lib/notifications";
-import { isAlertPrefs, isArray, isLanguage, isLastAlert, isLensList, isLocationList, isOrientation, isSavedLocation, isSearchRange, isString } from "@/lib/persisted-validators";
+import { isAlertPrefs, isLanguage, isLastAlert, isLensList, isLocationList, isLogEntry, isLogList, isOrientation, isSavedLocation, isSearchRange, isString } from "@/lib/persisted-validators";
 import { PwaInstallButton } from "@/components/PwaRegister";
 import { tx, type Language, type Localized } from "@/lib/i18n";
 import { APP_VERSION } from "@/lib/version";
+import { CREATOR, LANGUAGE_PATHS, SEO_COPY } from "@/lib/seo-copy";
 
 const StormMap = dynamic(() => import("@/components/StormMap"), { ssr: false });
 
@@ -94,19 +96,6 @@ interface RadarMetadata {
   radar: { past: Array<{ time: number; path: string }> };
 }
 
-interface LogEntry {
-  id: string;
-  timestamp: string;
-  target: string;
-  tleType: string;
-  lens: string;
-  iso: number;
-  aperture: number;
-  shutter: string;
-  success: "yes" | "no" | "uncertain";
-  notes: string;
-}
-
 const DEFAULT_LOCATION: SavedLocation = {
   id: "sparta-home",
   name: "Σπάρτη — προεπιλεγμένη θέση",
@@ -119,6 +108,18 @@ const DEFAULT_LOCATION: SavedLocation = {
   notes: "Προσεγγιστικές συντεταγμένες πόλης. Αντικατάστησέ τες με την ακριβή θέση σου.",
   safetyNotes: "Επιβεβαίωσε την πρόσβαση και την ασφάλεια πριν από νυχτερινή παρατήρηση.",
 };
+
+const DEFAULT_SITE_TEXT = {
+  name: tx("Σπάρτη — προεπιλεγμένη θέση", "Sparta — default site"),
+  safetyNotes: tx("Επιβεβαίωσε την πρόσβαση και την ασφάλεια πριν από νυχτερινή παρατήρηση.", "Check access and safety before a night session."),
+};
+
+/** The built-in site's untouched texts in the visitor's language; anything the user typed stays as is. */
+function localizeSite(site: SavedLocation, language: Language): SavedLocation {
+  if (site.id !== DEFAULT_LOCATION.id) return site;
+  const text = (value: string, localized: Localized) => (value === localized.el || value === localized.en ? localized[language] : value);
+  return { ...site, name: text(site.name, DEFAULT_SITE_TEXT.name), safetyNotes: text(site.safetyNotes, DEFAULT_SITE_TEXT.safetyNotes) };
+}
 
 const navItems: Array<{ id: Screen; label: string; labelEn: string; icon: LucideIcon }> = [
   { id: "dashboard", label: "Παρατηρητήριο", labelEn: "Dashboard", icon: LayoutDashboard },
@@ -138,7 +139,8 @@ const DEFAULT_ALERT_PREFS: AlertPreferences = { minimumScore: 60, confidence: "m
 // Without observed lightning the score is capped at 69; only MTG-LI storms can go higher.
 const MAX_FORECAST_SCORE = 69;
 const AUTO_REFRESH_MS = 15 * 60_000;
-const CREATOR_URL = "https://www.linkedin.com/in/konstantinos-kalliakoudis-902b90103/";
+// Phones pause timers in the background; back on screen, older data is rescanned at once.
+const RETURN_REFRESH_MS = 5 * 60_000;
 const LOCATION_DEBOUNCE_MS = 700;
 
 function safeRead<T>(key: string, fallback: T, validate?: (value: unknown) => value is T): T {
@@ -152,6 +154,37 @@ function safeRead<T>(key: string, fallback: T, validate?: (value: unknown) => va
   } catch {
     return fallback;
   }
+}
+
+const LANGUAGE_CHOICE_KEY = "spritehunter.language-choice";
+// Older versions stored the language on every visit, so only a stored "en" was a real choice.
+const LEGACY_LANGUAGE_KEY = "spritehunter.language";
+
+/**
+ * The page's own language (/ or /en) unless the visitor has picked one. The address bar,
+ * <html lang>, title and description follow the language on screen, so a shared link
+ * and a reload show the same language.
+ */
+function useLanguage(initial: Language) {
+  const [language, setLanguage] = useState(initial);
+  useEffect(() => {
+    const choice = safeRead<Language | null>(LANGUAGE_CHOICE_KEY, null, isLanguage)
+      ?? (safeRead<Language | null>(LEGACY_LANGUAGE_KEY, null, isLanguage) === "en" ? "en" : null);
+    if (choice) setLanguage(choice);
+  }, []);
+  useEffect(() => {
+    const copy = SEO_COPY[language];
+    document.documentElement.lang = language;
+    document.title = copy.title;
+    document.querySelector('meta[name="description"]')?.setAttribute("content", copy.description);
+    const path = LANGUAGE_PATHS[language];
+    if (window.location.pathname !== path) window.history.replaceState(null, "", `${path}${window.location.search}${window.location.hash}`);
+  }, [language]);
+  const choose = useCallback((next: Language) => {
+    setLanguage(next);
+    try { window.localStorage.setItem(LANGUAGE_CHOICE_KEY, JSON.stringify(next)); } catch { /* Storage can be disabled. */ }
+  }, []);
+  return [language, choose] as const;
 }
 
 /** localStorage-backed state; `hydrated` turns true once the stored value has been read. */
@@ -361,15 +394,15 @@ function Metric({ label, value, hint, icon: Icon }: { label: string; value: stri
   );
 }
 
-export default function SpriteHunterApp() {
+export default function SpriteHunterApp({ initialLanguage }: { initialLanguage: Language }) {
   const [screen, setScreen] = useState<Screen>("dashboard");
-  const [language, setLanguage] = usePersistedState<Language>("spritehunter.language", "el", isLanguage);
+  const [language, setLanguage] = useLanguage(initialLanguage);
   const [locations, setLocations] = usePersistedState<SavedLocation[]>("spritehunter.locations", [DEFAULT_LOCATION], isLocationList);
   const [observer, setObserver, observerHydrated] = usePersistedState<SavedLocation>("spritehunter.observer", DEFAULT_LOCATION, isSavedLocation);
   const [lenses, setLenses] = usePersistedState<LensProfile[]>("spritehunter.lenses.v2", DEFAULT_LENSES, isLensList);
   const [selectedLensId, setSelectedLensId] = usePersistedState("spritehunter.selected-lens.v2", "tokina-atxi-11-16", isString);
   const [orientation, setOrientation] = usePersistedState<"landscape" | "portrait">("spritehunter.orientation", "landscape", isOrientation);
-  const [logs, setLogs] = usePersistedState<LogEntry[]>("spritehunter.logs", [], isArray<LogEntry>);
+  const [logs, setLogs] = usePersistedState<LogEntry[]>("spritehunter.logs", [], isLogList);
   const [range, setRange, rangeHydrated] = usePersistedState("spritehunter.range", { min: 200, max: 600 }, isSearchRange);
   const [alertPrefs, setAlertPrefs] = usePersistedState<AlertPreferences>("spritehunter.alerts", DEFAULT_ALERT_PREFS, isAlertPrefs);
   const [lastAlert, setLastAlert] = usePersistedState<{ at: string; score: number } | null>("spritehunter.last-alert", null, isLastAlert);
@@ -403,6 +436,12 @@ export default function SpriteHunterApp() {
   const mobileNavRef = useRef<HTMLElement>(null);
   const hydrated = observerHydrated && rangeHydrated;
   const t = (el: string, en: string) => L(language, el, en);
+  // For display and editing; the map and the scans use `observer`, so a language switch does not recentre or rescan.
+  const site = useMemo(() => localizeSite(observer, language), [observer, language]);
+  const siteList = useMemo(() => locations.map((location) => localizeSite(location, language)), [locations, language]);
+  // "Place — detail": phones show only the place, which otherwise was cut to "Σπάρτη — πρ…".
+  const [place, ...detail] = site.name.split(" — ");
+  const siteTitle = { place, detail: detail.join(" — ") };
 
   const terrainSite = `${observer.latitude}:${observer.longitude}:${observer.cameraHeightM}`;
   const terrainProfiles = terrainState?.site === terrainSite ? terrainState.profiles : null;
@@ -507,6 +546,14 @@ export default function SpriteHunterApp() {
     const timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, AUTO_REFRESH_MS);
     return () => clearInterval(timer);
   }, [refresh, hydrated]);
+  useEffect(() => {
+    if (!hydrated) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && checkedAt != null && Date.now() - checkedAt > RETURN_REFRESH_MS) refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [refresh, hydrated, checkedAt]);
   // The forecast is cached on the server, so a refresh can return the same targets in a
   // fraction of a second; confirm it briefly so the button does not look dead.
   const manualRefresh = async () => {
@@ -613,7 +660,8 @@ export default function SpriteHunterApp() {
     <div className="app-shell">
       <aside className="sidebar">
         <button className="brand" onClick={() => setScreen("dashboard")} aria-label={t("SpriteHunter αρχική", "SpriteHunter home")}>
-          <img className="brand-logo" src="/spritehunter-logo.png" alt="" width="216" height="72" />
+          {/* Lazy: the sidebar is hidden on phones, where an eager image would still download. */}
+          <img className="brand-logo" src="/spritehunter-logo.webp" alt="" width="216" height="72" loading="lazy" decoding="async" />
         </button>
         <nav aria-label={t("Κύρια πλοήγηση", "Main navigation")}>
           {navItems.map((item) => {
@@ -623,17 +671,17 @@ export default function SpriteHunterApp() {
         </nav>
         <div className="sidebar-foot">
           <div className="source-mini"><StatusDot status={error ? "unavailable" : loading ? "stale" : "available"} /><span>{loading ? t("Έλεγχος πηγών…", "Checking sources…") : error ? t("Σφάλμα παρόχου", "Provider error") : t("Ζωντανά μοντέλα", "Live models")}</span></div>
-          <p className="made-by">{t("Δημιουργία", "Created by")} <a href={CREATOR_URL} target="_blank" rel="noopener noreferrer">KonsKall</a></p>
+          <p className="made-by">{t("Δημιουργία", "Created by")} <a href={CREATOR.url} target="_blank" rel="noopener noreferrer">{CREATOR.name}</a></p>
           <p>v{APP_VERSION} · installable PWA</p>
         </div>
       </aside>
 
       <main className="main-shell">
         <header className="topbar">
-          <img className="mobile-brand-icon" src="/spritehunter-icon-192.png" alt="" width="34" height="34" />
+          <img className="mobile-brand-icon" src="/spritehunter-icon-128.webp" alt="" width="34" height="34" loading="lazy" decoding="async" />
           <div className="location-control">
             <MapPin size={18} />
-            <div><span>{t("Θέση παρατήρησης", "Observing site")}</span><p className="location-line"><strong>{observer.name}</strong><span className="coordinate">{observer.latitude.toFixed(4)}°, {observer.longitude.toFixed(4)}°</span></p></div>
+            <div><span>{t("Θέση παρατήρησης", "Observing site")}</span><p className="location-line"><strong>{siteTitle.place}{siteTitle.detail && <span className="site-detail"> — {siteTitle.detail}</span>}</strong><span className="coordinate">{observer.latitude.toFixed(4)}°, {observer.longitude.toFixed(4)}°</span></p></div>
           </div>
           <div className="top-actions">
             <PwaInstallButton language={language} />
@@ -646,17 +694,17 @@ export default function SpriteHunterApp() {
         </header>
 
         <div className="content">
-          {screen === "dashboard" && <DashboardView data={data} candidates={candidates} selected={selected} loading={loading} error={error} observer={observer} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onPoint={goPoint} onMap={() => setScreen("map")} onSelect={selectCandidate} />}
+          {screen === "dashboard" && <DashboardView data={data} candidates={candidates} selected={selected} loading={loading} error={error} observer={site} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onPoint={goPoint} onMap={() => setScreen("map")} onSelect={selectCandidate} />}
           {screen === "map" && <MapView candidates={candidates} selected={selected} observer={observer} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onRadar={setRadarVisible} onLightning={setLightningVisible} onInfrared={setInfraredVisible} onCloudTop={setCloudTopVisible} onInstability={setInstabilityVisible} onRings={setRingsVisible} onSelect={selectCandidate} onPoint={goPoint} />}
           {screen === "forecast" && <ForecastView candidates={candidates} selected={selected} onSelect={selectCandidate} onPoint={goPoint} />}
           {screen === "point" && <PointView candidate={selected} observer={observer} lens={selectedLens} fov={fov} framing={framing} terrain={terrain} terrainLoading={terrainLoading && !terrain} sky={currentSky} language={language} />}
           {screen === "sky" && <SkyView candidate={selected} terrain={terrain} fov={fov} lens={selectedLens} orientation={orientation} sky={currentSky} onOrientation={setOrientation} />}
-          {screen === "aurora" && <AuroraView aurora={aurora} loading={auroraLoading} lens={selectedLens} observer={observer} forecast={data?.observerForecast ?? []} />}
-          {screen === "locations" && <LocationsView observer={observer} locations={locations} candidate={selected} onObserver={setObserver} onLocations={setLocations} />}
+          {screen === "aurora" && <AuroraView aurora={aurora} loading={auroraLoading} lens={selectedLens} observer={site} forecast={data?.observerForecast ?? []} />}
+          {screen === "locations" && <LocationsView observer={site} locations={siteList} candidate={selected} onObserver={setObserver} onLocations={setLocations} />}
           {screen === "camera" && <CameraView candidate={selected} lenses={lenses} selectedLens={selectedLens} fov={fov} framing={framing} orientation={orientation} sky={currentSky} onSelect={setSelectedLensId} onLenses={setLenses} onOrientation={setOrientation} />}
           {screen === "logbook" && <LogbookView logs={logs} candidate={selected} lens={selectedLens} onLogs={setLogs} />}
           {screen === "alerts" && <AlertsView candidate={topCandidate} prefs={alertPrefs} lastAlert={lastAlert} permission={notificationPermission} onPrefs={setAlertPrefs} onRequestPermission={requestNotifications} />}
-          {screen === "settings" && <SettingsView observer={observer} range={range} data={data} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onObserver={setObserver} onRange={setRange} onLanguage={setLanguage} onRefresh={manualRefresh} />}
+          {screen === "settings" && <SettingsView observer={site} range={range} data={data} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onObserver={setObserver} onRange={setRange} onLanguage={setLanguage} onRefresh={manualRefresh} />}
         </div>
       </main>
 
@@ -983,7 +1031,7 @@ function PointView({ candidate, observer, lens, fov, framing, terrain, terrainLo
   const directions = `${horizontalError > 3 ? t("στρέψε δεξιά", "turn right") : horizontalError < -3 ? t("στρέψε αριστερά", "turn left") : t("σωστό αζιμούθιο", "azimuth OK")} · ${verticalError > 3 ? t("σήκωσε", "tilt up") : verticalError < -3 ? t("χαμήλωσε", "tilt down") : t("σωστή ανύψωση", "elevation OK")}`;
   const instruction = !sensorsActive ? t("Χειροκίνητη προεπισκόπηση · ενεργοποίησε τους αισθητήρες για ζωντανή καθοδήγηση", "Manual preview · enable the sensors for live guidance") : aligned ? t("Στόχος κεντραρισμένος", "Target centred") : directions;
   const bandWidthPercent = Math.max(6, Math.min(100, (targetHalfWidth * 2) / fov.horizontalDeg * 100));
-  const recommendation = photoRecommendation(lens, sky?.moonInterference ?? false, targetHalfWidth * 2, language);
+  const recommendation = photoRecommendation(lens, sky?.moonInterference ?? false, framing?.fits ?? true, language);
 
   return <div className="point-layout">
     <section className="point-hero">
@@ -1039,7 +1087,7 @@ function AuroraView({ aurora, loading, lens, observer, forecast }: { aurora: Aur
   const preset = aurora?.kp != null && aurora.kp >= 7
     ? { shutter: "2–5 s", iso: "1600–3200", aperture: `f/${Math.min(2.8, lens.maxAperture).toFixed(1)}`, interval: "1 s" }
     : { shutter: "5–10 s", iso: "3200–6400", aperture: `f/${Math.min(2.8, lens.maxAperture).toFixed(1)}`, interval: "1–2 s" };
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">NOAA SPACE WEATHER · AURORA MODE</span><h1>{t("Φωτογράφιση σέλαος", "Aurora photography")}</h1><p>{t(`Πραγματικά δεδομένα NOAA/SWPC, με ειλικρινή αξιολόγηση για τη θέση ${observer.name}.`, `Real NOAA/SWPC data, with an honest assessment for ${observer.name}.`)}</p></div><Sparkles size={31} /></div><div className="aurora-grid"><section className={`panel aurora-status level-${aurora?.level ?? "unknown"}`}><div className="aurora-gauge"><span>Kp</span><strong>{loading ? "…" : aurora?.kp?.toFixed(1) ?? "—"}</strong><small>/ 9</small></div><div><span className="eyebrow">CURRENT ASSESSMENT</span><h2>{loading ? t("Ανάκτηση διαστημικού καιρού…", "Fetching space weather…") : aurora ? pick(aurora.message) : t("Τα δεδομένα NOAA δεν είναι διαθέσιμα.", "NOAA data is unavailable.")}</h2><p>{active ? t("Κατεύθυνση: σκοτεινός βόρειος ορίζοντας, συνήθως 0–15° ανύψωση από την Ελλάδα.", "Direction: the dark northern horizon, usually 0–15° elevation from Greece.") : t("Από την Ελλάδα το σέλας είναι σπάνιο και συνήθως απαιτεί ακραία γεωμαγνητική καταιγίδα.", "From Greece the aurora is rare and usually needs an extreme geomagnetic storm.")}</p></div><div className="aurora-metrics"><Metric icon={Activity} label={t("Τοπικό OVATION", "Local OVATION")} value={aurora?.localProbabilityPercent == null ? "—" : `${aurora.localProbabilityPercent}%`} /><Metric icon={Navigation} label={t("Βόρειος τομέας", "Northern sector")} value={aurora?.northernSectorProbabilityPercent == null ? "—" : `${aurora.northernSectorProbabilityPercent}%`} /><Metric icon={Cloud} label={t("Υψηλή νέφωση εδώ", "High cloud here")} value={currentHour?.cloudCoverHigh == null ? "—" : `${currentHour.cloudCoverHigh}%`} /></div></section><section className="panel aurora-camera"><span className="eyebrow">AURORA STARTING PRESET</span><h2>{lens.name}</h2><div className="settings-grid"><Metric icon={Camera} label={t("Διάφραγμα", "Aperture")} value={preset.aperture} /><Metric icon={Gauge} label="ISO" value={preset.iso} /><Metric icon={Activity} label={t("Έκθεση", "Exposure")} value={preset.shutter} /><Metric icon={RefreshCw} label="Interval" value={preset.interval} /></div><ul className="aurora-checklist"><li>{t("Τρίποδο, RAW και χειροκίνητη εστίαση σε φωτεινό άστρο.", "Tripod, RAW and manual focus on a bright star.")}</li><li>{t("Ισορροπία λευκού 3.500–4.000 K και απενεργοποιημένη μακρά αποθορυβοποίηση.", "White balance 3,500–4,000 K and long-exposure noise reduction off.")}</li><li>{t("Κάνε δοκιμές προς Βορρά και έλεγχε το ιστόγραμμα χωρίς να καίγεται ο ορίζοντας.", "Take test shots to the north and check the histogram without burning out the horizon.")}</li></ul></section><section className="panel ovation-panel"><div className="panel-heading"><div><span className="eyebrow">LIVE OVATION AURORA</span><h2>{t("Βόρειο ημισφαίριο", "Northern hemisphere")}</h2></div><a href="https://www.swpc.noaa.gov/products/aurora-30-minute-forecast" target="_blank" rel="noreferrer">NOAA <ExternalLink size={14} /></a></div><img src="https://services.swpc.noaa.gov/images/animations/ovation/north/latest.jpg" alt={t("Τελευταία πρόγνωση OVATION για το βόρειο ημισφαίριο από NOAA SWPC", "Latest NOAA SWPC OVATION forecast for the northern hemisphere")} /><p className="data-note">{t("Το OVATION είναι βραχυπρόθεσμο μοντέλο ωοειδούς σέλαος. Η πιθανότητα πάνω σε βόρεια γεωγραφικά πλάτη δεν σημαίνει ότι είναι ορατό από την Ελλάδα.", "OVATION is a short-term model of the auroral oval. A probability over northern latitudes does not mean it is visible from Greece.")}</p></section></div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">NOAA SPACE WEATHER · AURORA MODE</span><h1>{t("Φωτογράφιση σέλαος", "Aurora photography")}</h1><p>{t(`Πραγματικά δεδομένα NOAA/SWPC, με ειλικρινή αξιολόγηση για τη θέση ${observer.name}.`, `Real NOAA/SWPC data, with an honest assessment for ${observer.name}.`)}</p></div><Sparkles size={31} /></div><div className="aurora-grid"><section className={`panel aurora-status level-${aurora?.level ?? "unknown"}`}><div className="aurora-gauge"><span>Kp</span><strong>{loading ? "…" : aurora?.kp?.toFixed(1) ?? "—"}</strong><small>/ 9</small></div><div><span className="eyebrow">CURRENT ASSESSMENT</span><h2>{loading ? t("Ανάκτηση διαστημικού καιρού…", "Fetching space weather…") : aurora ? pick(aurora.message) : t("Τα δεδομένα NOAA δεν είναι διαθέσιμα.", "NOAA data is unavailable.")}</h2><p>{active ? t("Κατεύθυνση: σκοτεινός βόρειος ορίζοντας, συνήθως 0–15° ανύψωση από την Ελλάδα.", "Direction: the dark northern horizon, usually 0–15° elevation from Greece.") : t("Από την Ελλάδα το σέλας είναι σπάνιο και συνήθως απαιτεί ακραία γεωμαγνητική καταιγίδα.", "From Greece the aurora is rare and usually needs an extreme geomagnetic storm.")}</p></div><div className="aurora-metrics"><Metric icon={Activity} label={t("Τοπικό OVATION", "Local OVATION")} value={aurora?.localProbabilityPercent == null ? "—" : `${aurora.localProbabilityPercent}%`} /><Metric icon={Navigation} label={t("Βόρειος τομέας", "Northern sector")} value={aurora?.northernSectorProbabilityPercent == null ? "—" : `${aurora.northernSectorProbabilityPercent}%`} /><Metric icon={Cloud} label={t("Υψηλή νέφωση εδώ", "High cloud here")} value={currentHour?.cloudCoverHigh == null ? "—" : `${currentHour.cloudCoverHigh}%`} /></div></section><section className="panel aurora-camera"><span className="eyebrow">AURORA STARTING PRESET</span><h2>{lens.name}</h2><div className="settings-grid"><Metric icon={Camera} label={t("Διάφραγμα", "Aperture")} value={preset.aperture} /><Metric icon={Gauge} label="ISO" value={preset.iso} /><Metric icon={Activity} label={t("Έκθεση", "Exposure")} value={preset.shutter} /><Metric icon={RefreshCw} label="Interval" value={preset.interval} /></div><ul className="aurora-checklist"><li>{t("Τρίποδο, RAW και χειροκίνητη εστίαση σε φωτεινό άστρο.", "Tripod, RAW and manual focus on a bright star.")}</li><li>{t("Ισορροπία λευκού 3.500–4.000 K και απενεργοποιημένη μακρά αποθορυβοποίηση.", "White balance 3,500–4,000 K and long-exposure noise reduction off.")}</li><li>{t("Κάνε δοκιμές προς Βορρά και έλεγχε το ιστόγραμμα χωρίς να καίγεται ο ορίζοντας.", "Take test shots to the north and check the histogram without burning out the horizon.")}</li></ul></section><section className="panel ovation-panel"><div className="panel-heading"><div><span className="eyebrow">LIVE OVATION AURORA</span><h2>{t("Βόρειο ημισφαίριο", "Northern hemisphere")}</h2></div><a href="https://www.swpc.noaa.gov/products/aurora-30-minute-forecast" target="_blank" rel="noreferrer">NOAA <ExternalLink size={14} /></a></div><img src="https://services.swpc.noaa.gov/images/animations/ovation/north/latest.jpg" width="800" height="800" loading="lazy" decoding="async" alt={t("Τελευταία πρόγνωση OVATION για το βόρειο ημισφαίριο από NOAA SWPC", "Latest NOAA SWPC OVATION forecast for the northern hemisphere")} /><p className="data-note">{t("Το OVATION είναι βραχυπρόθεσμο μοντέλο ωοειδούς σέλαος. Η πιθανότητα πάνω σε βόρεια γεωγραφικά πλάτη δεν σημαίνει ότι είναι ορατό από την Ελλάδα.", "OVATION is a short-term model of the auroral oval. A probability over northern latitudes does not mean it is visible from Greece.")}</p></section></div></div>;
 }
 
 function LocationsView({ observer, locations, candidate, onObserver, onLocations }: { observer: SavedLocation; locations: SavedLocation[]; candidate: StormCandidate | null; onObserver: (value: SavedLocation) => void; onLocations: (value: SavedLocation[]) => void }) {
@@ -1065,7 +1113,7 @@ function LocationsView({ observer, locations, candidate, onObserver, onLocations
 function CameraView({ candidate, lenses, selectedLens, fov, framing, orientation, sky, onSelect, onLenses, onOrientation }: { candidate: StormCandidate | null; lenses: LensProfile[]; selectedLens: LensProfile; fov: { horizontalDeg: number; verticalDeg: number }; framing: ReturnType<typeof framingAssessment> | null; orientation: "landscape" | "portrait"; sky: ReturnType<typeof skyState> | null; onSelect: (id: string) => void; onLenses: (value: LensProfile[]) => void; onOrientation: (value: "landscape" | "portrait") => void }) {
   const { t, language } = useI18n();
   const [custom, setCustom] = useState({ name: "", focal: 24, aperture: 2.8 });
-  const recommendation = photoRecommendation(selectedLens, sky?.moonInterference ?? false, candidate ? (Math.atan2(candidate.uncertaintyKm, candidate.distanceKm) * 360) / Math.PI : 10, language);
+  const recommendation = photoRecommendation(selectedLens, sky?.moonInterference ?? false, !candidate || (framing?.fits ?? true), language);
   const addLens = (event: FormEvent) => { event.preventDefault(); if (!custom.name.trim() || custom.focal <= 0 || custom.aperture <= 0) return; const lens: LensProfile = { id: createId(), name: custom.name, focalLengthMm: custom.focal, maxAperture: custom.aperture, mount: "Canon EF/EF-S", owned: true }; onLenses([...lenses, lens]); onSelect(lens.id); setCustom({ name: "", focal: 24, aperture: 2.8 }); };
   return (
     <div className="view-stack">
@@ -1124,13 +1172,19 @@ function CameraView({ candidate, lenses, selectedLens, fov, framing, orientation
 
 function LogbookView({ logs, candidate, lens, onLogs }: { logs: LogEntry[]; candidate: StormCandidate | null; lens: LensProfile; onLogs: (value: LogEntry[]) => void }) {
   const { t, language } = useI18n();
+  // A malformed stored entry is skipped, not allowed to break the screen.
+  const entries = logs.filter(isLogEntry);
   const [form, setForm] = useState({ tleType: "Red Sprite", iso: 3200, aperture: effectiveMaxAperture(lens), shutter: "3 s", success: "uncertain" as LogEntry["success"], notes: "" });
   const add = (event: FormEvent) => { event.preventDefault(); onLogs([{ id: createId(), timestamp: new Date().toISOString(), target: candidate ? `${candidate.bearingDeg.toFixed(1)}° / ${candidate.distanceKm.toFixed(0)} km` : t("Χωρίς στόχο", "No target"), lens: lens.name, ...form }, ...logs]); setForm({ ...form, notes: "" }); };
   const download = (format: "json" | "csv") => {
     const content = format === "json" ? JSON.stringify(logs, null, 2) : ["timestamp,target,tleType,lens,iso,aperture,shutter,success,notes", ...logs.map((entry) => [entry.timestamp, entry.target, entry.tleType, entry.lens, entry.iso, entry.aperture, entry.shutter, entry.success, entry.notes].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","))].join("\n");
-    const url = URL.createObjectURL(new Blob([content], { type: format === "json" ? "application/json" : "text/csv" })); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `spritehunter-logbook.${format}`; anchor.click(); URL.revokeObjectURL(url);
+    // The BOM makes Excel read the CSV as UTF-8 (Greek notes were garbled); Safari starts the
+    // download after click() returns, so the blob URL is released a little later.
+    const blob = new Blob([format === "csv" ? `﻿${content}` : content], { type: format === "json" ? "application/json" : "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `spritehunter-logbook.${format}`; anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   };
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">OBSERVATION ARCHIVE</span><h1>{t("Ημερολόγιο παρατήρησης", "Observation logbook")}</h1><p>{t("Οι καταχωρίσεις αποθηκεύονται τοπικά και οι ώρες εσωτερικά σε UTC.", "Entries are stored locally, with times kept in UTC.")}</p></div><div className="export-actions"><button onClick={() => download("csv")}><Download size={16} />CSV</button><button onClick={() => download("json")}><Download size={16} />JSON</button></div></div><div className="log-grid"><form className="panel log-form" onSubmit={add}><h2>{t("Νέα καταχώριση", "New entry")}</h2><label>{t("Τύπος TLE", "TLE type")}<select value={form.tleType} onChange={(event) => setForm({ ...form, tleType: event.target.value })}><option>Red Sprite</option><option>Sprite Halo</option><option>ELVES</option><option>Blue Jet</option><option>Gigantic Jet</option></select></label><div className="three-fields"><label>ISO<NumberField min={50} max={409600} value={form.iso} onCommit={(iso) => setForm({ ...form, iso })} /></label><label>{t("Διάφραγμα", "Aperture")}<NumberField min={0.5} max={64} value={form.aperture} onCommit={(aperture) => setForm({ ...form, aperture })} /></label><label>{t("Έκθεση", "Exposure")}<input value={form.shutter} onChange={(event) => setForm({ ...form, shutter: event.target.value })} /></label></div><label>{t("Αποτέλεσμα", "Result")}<select value={form.success} onChange={(event) => setForm({ ...form, success: event.target.value as LogEntry["success"] })}><option value="yes">{t("Επιτυχία", "Success")}</option><option value="no">{t("Όχι", "No")}</option><option value="uncertain">{t("Αβέβαιο", "Uncertain")}</option></select></label><label>{t("Σημειώσεις", "Notes")}<textarea rows={4} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label><button className="primary-action"><Plus size={17} />{t("Καταχώριση", "Add entry")}</button></form><section className="panel"><h2>{t("Προηγούμενες παρατηρήσεις", "Past observations")}</h2>{logs.length ? <div className="log-list">{logs.map((entry) => <article key={entry.id}><div><strong>{entry.tleType}</strong><span className={`result-${entry.success}`}>{entry.success === "yes" ? t("Επιτυχία", "Success") : entry.success === "no" ? t("Όχι", "No") : t("Αβέβαιο", "Uncertain")}</span></div><small>{formatAthens(entry.timestamp, language)} · {entry.target}</small><p>{entry.lens} · f/{entry.aperture} · ISO {entry.iso} · {entry.shutter}</p>{entry.notes && <blockquote>{entry.notes}</blockquote>}<button aria-label={t("Διαγραφή", "Delete")} onClick={() => onLogs(logs.filter((item) => item.id !== entry.id))}><Trash2 size={15} /></button></article>)}</div> : <EmptyState title={t("Το ημερολόγιο είναι κενό", "The logbook is empty")} description={t("Κατέγραψε τις πραγματικές προσπάθειες για μελλοντική αξιολόγηση του δείκτη.", "Record your real attempts to evaluate the index later.")} />}</section></div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">OBSERVATION ARCHIVE</span><h1>{t("Ημερολόγιο παρατήρησης", "Observation logbook")}</h1><p>{t("Οι καταχωρίσεις αποθηκεύονται τοπικά και οι ώρες εσωτερικά σε UTC.", "Entries are stored locally, with times kept in UTC.")}</p></div><div className="export-actions"><button onClick={() => download("csv")}><Download size={16} />CSV</button><button onClick={() => download("json")}><Download size={16} />JSON</button></div></div><div className="log-grid"><form className="panel log-form" onSubmit={add}><h2>{t("Νέα καταχώριση", "New entry")}</h2><label>{t("Τύπος TLE", "TLE type")}<select value={form.tleType} onChange={(event) => setForm({ ...form, tleType: event.target.value })}><option>Red Sprite</option><option>Sprite Halo</option><option>ELVES</option><option>Blue Jet</option><option>Gigantic Jet</option></select></label><div className="three-fields"><label>ISO<NumberField min={50} max={409600} value={form.iso} onCommit={(iso) => setForm({ ...form, iso })} /></label><label>{t("Διάφραγμα", "Aperture")}<NumberField min={0.5} max={64} value={form.aperture} onCommit={(aperture) => setForm({ ...form, aperture })} /></label><label>{t("Έκθεση", "Exposure")}<input value={form.shutter} onChange={(event) => setForm({ ...form, shutter: event.target.value })} /></label></div><label>{t("Αποτέλεσμα", "Result")}<select value={form.success} onChange={(event) => setForm({ ...form, success: event.target.value as LogEntry["success"] })}><option value="yes">{t("Επιτυχία", "Success")}</option><option value="no">{t("Όχι", "No")}</option><option value="uncertain">{t("Αβέβαιο", "Uncertain")}</option></select></label><label>{t("Σημειώσεις", "Notes")}<textarea rows={4} value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} /></label><button className="primary-action"><Plus size={17} />{t("Καταχώριση", "Add entry")}</button></form><section className="panel"><h2>{t("Προηγούμενες παρατηρήσεις", "Past observations")}</h2>{entries.length ? <div className="log-list">{entries.map((entry) => <article key={entry.id}><div><strong>{entry.tleType}</strong><span className={`result-${entry.success}`}>{entry.success === "yes" ? t("Επιτυχία", "Success") : entry.success === "no" ? t("Όχι", "No") : t("Αβέβαιο", "Uncertain")}</span></div><small>{formatAthens(entry.timestamp, language)} · {entry.target}</small><p>{entry.lens} · f/{entry.aperture} · ISO {entry.iso} · {entry.shutter}</p>{entry.notes && <blockquote>{entry.notes}</blockquote>}<button aria-label={t("Διαγραφή", "Delete")} onClick={() => onLogs(logs.filter((item) => item.id !== entry.id))}><Trash2 size={15} /></button></article>)}</div> : <EmptyState title={t("Το ημερολόγιο είναι κενό", "The logbook is empty")} description={t("Κατέγραψε τις πραγματικές προσπάθειες για μελλοντική αξιολόγηση του δείκτη.", "Record your real attempts to evaluate the index later.")} />}</section></div></div>;
 }
 
 function AlertsView({ candidate, prefs, lastAlert, permission, onPrefs, onRequestPermission }: {

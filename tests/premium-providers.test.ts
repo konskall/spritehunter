@@ -37,6 +37,18 @@ describe("Xweather CG summary", () => {
     expect(quotaAllows({ remaining: 900, resetAtMs: reset }, reset)).toBe(true);
   });
 
+  it("lets one day spend only its share of what is left", () => {
+    const now = Date.parse("2026-10-20T21:00:00Z");
+    const reset = Date.parse("2026-10-30T00:00:00Z");
+    const day = Math.floor(now / 86_400_000);
+    // 10 days left, 6,000 above the reserve at the start of the day: 600 for today.
+    const state = { resetAtMs: reset, day, dayStartRemaining: 7_000 };
+    expect(quotaAllows({ ...state, remaining: 6_500 }, now)).toBe(true);
+    expect(quotaAllows({ ...state, remaining: 6_400 }, now)).toBe(false);
+    // The share starts again on the next UTC day.
+    expect(quotaAllows({ ...state, remaining: 6_400 }, now + 86_400_000)).toBe(true);
+  });
+
   it("throws on an unsuccessful response instead of inventing zero strokes", () => {
     expect(() => parseCgSummary({ success: false, error: { code: "invalid_client", description: "bad key" }, response: [] }, retrievedAt, 15)).toThrow(/invalid_client/);
   });

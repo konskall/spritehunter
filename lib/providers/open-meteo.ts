@@ -696,7 +696,7 @@ export async function fetchOpportunities(
     : !darkEnough
       ? { status: "available", message: tx("Ρυθμισμένο· οι θετικοί κεραυνοί +CG ελέγχονται μόλις σκοτεινιάσει (ήλιος κάτω από −6°), ώστε να μην ξοδεύονται μονάδες τη μέρα.", "Configured; positive +CG strokes are checked once it is dark (Sun below −6°) so no accesses are spent by day.") }
     : !quotaLeft
-      ? { status: "stale", message: tx("Το μηνιαίο όριο του Xweather πλησιάζει στο τέλος· οι έλεγχοι +CG σταματούν ως την ανανέωση της περιόδου.", "The monthly Xweather allowance is nearly used up; +CG checks pause until the period resets.") }
+      ? { status: "stale", message: tx("Το σημερινό μερίδιο ή το μηνιαίο όριο του Xweather εξαντλήθηκε· οι έλεγχοι +CG ξαναρχίζουν την επόμενη μέρα (UTC) ή με την ανανέωση της περιόδου.", "Today's share or the monthly Xweather allowance is used up; +CG checks resume the next UTC day or when the period resets.") }
     : !cgCheck?.checked
       ? { status: "available", message: tx("Ρυθμισμένο· δεν υπάρχει παρατηρημένη καταιγίδα στην ακτίνα σάρωσης για έλεγχο +CG.", "Configured; no observed storm in the scan range to check for +CG.") }
       : cgCheck.succeeded
@@ -741,7 +741,7 @@ export async function fetchOpportunities(
       { id: "xweather", label: tx("Vaisala Xweather +CG", "Vaisala Xweather +CG"), status: xweather.status, checkedAt: fetchedAt, message: xweather.message },
       { id: "weatherapi", label: tx("WeatherAPI.com νέφωση", "WeatherAPI.com cloud"), status: skySources.weatherApi.status, checkedAt: fetchedAt, message: skySources.weatherApi.message },
       { id: "openweather", label: tx("OpenWeatherMap νέφωση", "OpenWeatherMap cloud"), status: skySources.openWeather.status, checkedAt: fetchedAt, message: skySources.openWeather.message },
-      { id: "terrain", label: tx("OpenTopoData SRTM", "OpenTopoData SRTM"), status: "stale", checkedAt: fetchedAt, message: tx("Το DEM ελέγχεται μόνο κατά την επιλογή στόχου, ώστε να προστατεύεται το δημόσιο quota.", "The DEM is checked only when a target is selected, to protect the public quota.") },
+      { id: "terrain", label: tx("OpenTopoData SRTM", "OpenTopoData SRTM"), status: "stale", checkedAt: fetchedAt, message: tx("Ο ορίζοντας DEM ελέγχεται μετά τη σάρωση για όλους τους στόχους της λίστας, με ένα αίτημα και cache μίας εβδομάδας ανά διεύθυνση.", "The DEM horizon is checked after the scan for every listed target, in one request with a week-long cache per bearing.") },
     ],
     warnings: [
       observedCount

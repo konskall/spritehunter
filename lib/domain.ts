@@ -292,6 +292,19 @@ export interface TerrainProfile {
   message: Localized;
 }
 
+export interface LogEntry {
+  id: string;
+  timestamp: string;
+  target: string;
+  tleType: string;
+  lens: string;
+  iso: number;
+  aperture: number;
+  shutter: string;
+  success: "yes" | "no" | "uncertain";
+  notes: string;
+}
+
 export interface SavedLocation extends Coordinates {
   id: string;
   name: string;

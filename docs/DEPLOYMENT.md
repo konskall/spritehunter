@@ -11,13 +11,17 @@
 
 Μετά από αυτό, κάθε push στο `main` ανεβαίνει αυτόματα σε παραγωγή, ενώ κάθε άλλο branch ή pull request παίρνει δική του preview διεύθυνση.
 
+Το `vercel.json` τρέχει τις functions στη Φρανκφούρτη (`fra1`), κοντά στους Ευρωπαίους παρόχους (Open-Meteo, EUMETSAT, MeteoAlarm) και στους χρήστες στην Ελλάδα. Το δωρεάν πλάνο επιτρέπει μία περιοχή.
+
+Το `next.config.ts` στέλνει security headers σε όλες τις σελίδες: απαγόρευση ενσωμάτωσης σε iframe, `nosniff`, `Referrer-Policy` και `Permissions-Policy` μόνο για κάμερα, GPS και αισθητήρες κίνησης.
+
 ### Μεταβλητές περιβάλλοντος (προαιρετικές)
 
 Ορίζονται στο **Settings → Environment Variables**:
 
 - `XWEATHER_CLIENT_ID`, `XWEATHER_CLIENT_SECRET`: θετικοί κεραυνοί +CG και ένταση ρεύματος από το Xweather. Χωρίς αυτά η εφαρμογή χρησιμοποιεί μόνο το δωρεάν MTG-LI.
 - `WEATHERAPI_KEY`, `OPENWEATHER_API_KEY`: δεύτερη και τρίτη πρόγνωση νέφωσης για τη θέση σου. Χωρίς αυτά η νέφωση έρχεται μόνο από το Open-Meteo.
-- `SITE_URL`: η δημόσια διεύθυνση για canonical, Open Graph, `robots.txt` και sitemap. Χρειάζεται μόνο με δικό σου domain· αλλιώς χρησιμοποιείται αυτόματα η διεύθυνση παραγωγής του Vercel.
+- `SITE_URL`: η δημόσια διεύθυνση για canonical, hreflang, Open Graph, `robots.txt`, sitemap και `llms.txt`. Χρειάζεται μόνο με δικό σου domain· αλλιώς χρησιμοποιείται αυτόματα η διεύθυνση παραγωγής του Vercel.
 
 Μυστικά δεν μπαίνουν ποτέ σε μεταβλητές `NEXT_PUBLIC_`.
 

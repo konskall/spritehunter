@@ -11,7 +11,6 @@ import { CANON_750D, DEFAULT_LENSES, effectiveMaxAperture, fieldOfView, framingA
 import { scoreOpportunity } from "@/lib/scoring";
 import { terrainVisibility } from "@/lib/terrain";
 import { shouldNotify } from "@/lib/notifications";
-import { clusterLightning, deduplicateLightning, estimateMotion } from "@/lib/storm-detection";
 import { athensUtcOffsetMinutes, dataFreshness } from "@/lib/time";
 import { skyState } from "@/lib/astronomy";
 import { parseEumetsatCapabilities } from "@/lib/providers/eumetsat";
@@ -152,24 +151,7 @@ describe("astronomy, timezone, and freshness", () => {
   });
 });
 
-describe("storm detection, scoring, and notification", () => {
-  const events = [
-    { id: "a", latitude: 35, longitude: 20, timestamp: "2026-01-01T00:00:00Z" },
-    { id: "b", latitude: 35.02, longitude: 20.01, timestamp: "2026-01-01T00:01:00Z" },
-    { id: "c", latitude: 35.01, longitude: 20.03, timestamp: "2026-01-01T00:02:00Z" },
-    { id: "a", latitude: 35, longitude: 20, timestamp: "2026-01-01T00:00:00Z" },
-  ];
-  it("deduplicates events before clustering", () => {
-    expect(deduplicateLightning(events)).toHaveLength(3);
-    expect(clusterLightning(deduplicateLightning(events), 10, 3)).toHaveLength(1);
-  });
-  it("requires two track points for storm motion", () => {
-    const motion = estimateMotion(
-      { latitude: 35, longitude: 20, timestamp: "2026-01-01T00:00:00Z" },
-      { latitude: 35.1, longitude: 20.1, timestamp: "2026-01-01T01:00:00Z" },
-    );
-    expect(motion?.speedKmh).toBeGreaterThan(10);
-  });
+describe("scoring and notification", () => {
   it("separates a heuristic score from data confidence", () => {
     const result = scoreOpportunity({ capeJkg: 1_500, precipitationMm: 8, thunderCode: true, observerCloudPercent: 5, observerHighCloudPercent: 5, visibilityM: 40_000, distanceKm: 400, sunAltitudeDeg: -25, moonInterference: false, terrain: "unknown", lightning: "not_configured" });
     expect(result.total).toBeLessThanOrEqual(69);

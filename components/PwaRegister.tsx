@@ -112,7 +112,7 @@ export function PwaInstallButton({ language }: { language: Language }) {
           <section className="pwa-dialog" role="dialog" aria-modal="true" aria-labelledby="pwa-dialog-title">
             <button className="pwa-dialog-close" type="button" onClick={() => setShowHelp(false)} aria-label={t("Κλείσιμο", "Close")}><X size={18} /></button>
             {/* eslint-disable-next-line @next/next/no-img-element -- static PWA icon, not an LCP image */}
-            <img src="/spritehunter-icon-192.png" width="64" height="64" alt="" />
+            <img src="/spritehunter-icon-128.webp" width="64" height="64" alt="" />
             <span className="eyebrow">SPRITEHUNTER PWA</span>
             <h2 id="pwa-dialog-title">{t("Εγκατάσταση στο κινητό", "Install on your phone")}</h2>
             {isIos ? (

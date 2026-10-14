@@ -59,7 +59,12 @@ export function framingAssessment(
   };
 }
 
-export function photoRecommendation(lens: LensProfile, moonInterference: boolean, uncertaintyDeg: number, language: Language = "el") {
+/**
+ * Starting exposure for the lens. `fits` is the frame check for the selected target (true
+ * without one): the warning used to fire for any uncertainty above 8°, so even an 11 mm
+ * lens whose frame easily covered the target was told to go wider.
+ */
+export function photoRecommendation(lens: LensProfile, moonInterference: boolean, fits: boolean, language: Language = "el") {
   const narrow = lens.focalLengthMm >= 85;
   const aperture = effectiveMaxAperture(lens);
   const el = language === "el";
@@ -74,7 +79,7 @@ export function photoRecommendation(lens: LensProfile, moonInterference: boolean
     format: "RAW",
     interval: el ? "1 s ανάμεσα στα καρέ" : "1 s between frames",
     warning:
-      narrow || uncertaintyDeg > 8
+      !fits
         ? (el ? "Το κάδρο είναι στενό για την αβεβαιότητα του στόχου· ξεκίνησε με μικρότερη εστιακή απόσταση." : "The frame is narrow for the target's uncertainty; start with a shorter focal length.")
         : (el ? "Το κάδρο καλύπτει την αρχική αναζήτηση· έλεγχε συχνά την κίνηση της καταιγίδας." : "The frame covers the initial search; check the storm's movement often."),
   };
