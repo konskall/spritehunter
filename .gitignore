@@ -38,8 +38,5 @@ yarn-error.log*
 next-env.d.ts
 *.tsbuildinfo
 
-# local leftovers of the earlier Cloudflare build, and browser-test output
-/dist/
-/.wrangler/
-/.sites-runtime/
+# browser-test output
 /.playwright-mcp/

@@ -12,10 +12,6 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
-    // Local leftovers of the earlier Cloudflare build and OpenAI Sites packaging.
-    "dist/**",
-    ".wrangler/**",
-    ".sites-runtime/**",
   ]),
 ]);
 

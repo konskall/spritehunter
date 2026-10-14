@@ -1,4 +1,6 @@
-const CACHE = "spritehunter-shell-v6";
+const CACHE = "spritehunter-shell-v7";
+// What the app and the offline page show. The 512 px and Apple icons are only read when the app
+// is installed, so they are not downloaded for every visitor (about 360 KB).
 const SHELL = [
   "/",
   "/en",
@@ -6,8 +8,6 @@ const SHELL = [
   "/manifest.webmanifest",
   "/spritehunter-icon-128.webp",
   "/spritehunter-icon-192.png",
-  "/spritehunter-icon-512.png",
-  "/apple-touch-icon.png",
   "/spritehunter-logo.webp",
 ];
 // Every deploy adds new hashed scripts; keep the newest entries so the cache cannot grow forever.

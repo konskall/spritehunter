@@ -1,12 +1,43 @@
-@import "tailwindcss";
+/* Browser reset: the part of Tailwind's preflight this app relied on (Tailwind itself was not
+   used). It stays in a cascade layer, so every rule below wins over it whatever its specificity. */
+@layer base {
+  *, ::before, ::after { box-sizing: border-box; margin: 0; padding: 0; border: 0 solid; }
+  /* -webkit-text-size-adjust stays apart from text-size-adjust: in one rule the minifier drops
+     the prefixed form, and iOS Safari then enlarges text in landscape. */
+  html { line-height: 1.5; tab-size: 4; -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; }
+  h1, h2, h3, h4, h5, h6 { font-size: inherit; font-weight: inherit; }
+  a { color: inherit; text-decoration: inherit; }
+  b, strong { font-weight: bolder; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 1em; }
+  small { font-size: 80%; }
+  ol, ul { list-style: none; }
+  img, svg, video { display: block; vertical-align: middle; }
+  img, video { max-width: 100%; height: auto; }
+  button, input, select, textarea { font: inherit; letter-spacing: inherit; color: inherit; opacity: 1; background-color: transparent; border-radius: 0; }
+  button, input:where([type="button"], [type="reset"], [type="submit"]) { appearance: button; }
+  textarea { resize: vertical; }
+  ::placeholder { opacity: 1; }
+  /* Safari before 17 crashes on color-mix() with currentcolor here, so it keeps its default. */
+  @supports (not (-webkit-appearance: -apple-pay-button)) or (contain-intrinsic-size: 1px) {
+    ::placeholder { color: currentcolor; color: color-mix(in oklab, currentcolor 50%, transparent); }
+  }
+  /* Time inputs keep one height: iOS collapses an empty one, Safari and Chrome pad the fields. */
+  ::-webkit-date-and-time-value { min-height: 1lh; text-align: inherit; }
+  ::-webkit-datetime-edit { display: inline-flex; padding-block: 0; }
+  ::-webkit-datetime-edit-fields-wrapper { padding: 0; }
+  ::-webkit-datetime-edit-hour-field { padding-block: 0; }
+  ::-webkit-datetime-edit-minute-field { padding-block: 0; }
+  ::-webkit-datetime-edit-meridiem-field { padding-block: 0; }
+  ::-webkit-calendar-picker-indicator { line-height: 1; }
+  :-moz-focusring { outline: auto; }
+  :-moz-ui-invalid { box-shadow: none; }
+  [hidden]:where(:not([hidden="until-found"])) { display: none !important; }
+}
 
 :root {
   color-scheme: dark;
   --bg: #07111d;
-  --bg-deep: #040a12;
   --panel: #0d1a28;
-  --panel-2: #111f2d;
-  --panel-3: #162838;
   --line: rgba(156, 184, 205, 0.14);
   --line-strong: rgba(156, 184, 205, 0.26);
   --text: #edf5f9;
@@ -22,10 +53,8 @@
   --radius: 15px;
 }
 
-* { box-sizing: border-box; }
-html { background: var(--bg); -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+html { background: var(--bg); text-size-adjust: 100%; }
 body {
-  margin: 0;
   background:
     radial-gradient(circle at 80% -10%, rgba(62, 105, 143, 0.13), transparent 31rem),
     var(--bg);
@@ -33,14 +62,10 @@ body {
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
-button, input, select, textarea { font: inherit; }
 /* Safari sizes a select to its longest option; let form controls shrink with their column. */
 input, select, textarea { max-width: 100%; min-width: 0; }
 select { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-button { color: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible { outline: 2px solid var(--mint); outline-offset: 2px; }
-a { color: inherit; }
-button, a, input, select, textarea, label, [role="button"] { -webkit-tap-highlight-color: transparent; }
 button, a, label, select, [role="button"] { touch-action: manipulation; }
 
 .pwa-install-button svg { color: var(--mint); }
@@ -324,20 +349,6 @@ button, a, label, select, [role="button"] { touch-action: manipulation; }
 .point-grid span, .point-grid strong { display: block; }
 .point-grid span { color: var(--subtle); font-size: 10.5px; }
 .point-grid strong { margin-top: 4px; font-size: 11px; }
-.compass-stage { position: relative; width: min(310px, 78vw); height: min(310px, 78vw); margin: 26px auto 16px; display: grid; place-items: center; }
-.compass-ring { position: absolute; inset: 0; border: 1px solid rgba(125,228,202,.35); border-radius: 50%; background: repeating-conic-gradient(from -1deg, rgba(125,228,202,.48) 0 1deg, transparent 1deg 10deg); -webkit-mask: radial-gradient(circle, transparent 0 71%, #000 71% 100%); mask: radial-gradient(circle, transparent 0 71%, #000 71% 100%); transition: transform .2s ease-out; }
-.compass-ring > span { position: absolute; font: 700 12px ui-monospace, monospace; color: #bfd2dc; }
-.compass-ring .north { top: 9%; left: 50%; transform: translateX(-50%); color: var(--red-soft); }
-.compass-ring .east { right: 9%; top: 50%; transform: translateY(-50%); }
-.compass-ring .south { bottom: 9%; left: 50%; transform: translateX(-50%); }
-.compass-ring .west { left: 9%; top: 50%; transform: translateY(-50%); }
-.target-needle { position: absolute; inset: 7%; border-radius: 50%; }
-.target-needle i { position: absolute; left: calc(50% - 1px); top: 0; width: 2px; height: 50%; background: linear-gradient(var(--red-soft), transparent); transform-origin: bottom; }
-.target-needle i::before { content: ""; position: absolute; top: -4px; left: -4px; width: 10px; height: 10px; border-radius: 50%; background: var(--red); box-shadow: 0 0 18px var(--red); }
-.alignment-dot { position: relative; z-index: 2; display: grid; place-items: center; width: 88px; height: 88px; border-radius: 50%; border: 1px solid var(--line-strong); background: #0b1b29; color: var(--muted); }
-.alignment-dot.aligned { color: var(--mint); border-color: var(--mint); box-shadow: 0 0 28px rgba(125,228,202,.14); }
-.alignment-dot span { display: block; font: 11px ui-monospace, monospace; }
-.sensor-button { margin: 0 auto; }
 .sensor-note { max-width: 530px; margin: 10px auto 0; color: var(--subtle); font-size: 11.5px; line-height: 1.5; }
 .wmm-toggle { width: min(650px, 100%); margin: 12px auto 0; display: flex; align-items: flex-start; gap: 9px; padding: 10px 12px; border: 1px solid rgba(109,184,232,.2); border-radius: 9px; color: var(--subtle); background: rgba(109,184,232,.045); text-align: left; font-size: 11px; line-height: 1.5; }
 .wmm-toggle input { margin-top: 2px; flex: 0 0 auto; }

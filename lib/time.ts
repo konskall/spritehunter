@@ -1,4 +1,4 @@
-export const ATHENS_TIME_ZONE = "Europe/Athens";
+const ATHENS_TIME_ZONE = "Europe/Athens";
 // 24-hour clock in both languages: Greek defaults to 12-hour, which showed 00:05 as "12:05 π.μ."
 // on a night-time app.
 const HOUR_CYCLE = "h23";

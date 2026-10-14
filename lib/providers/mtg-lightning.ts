@@ -89,7 +89,7 @@ export function lightningFrameSize(bounds: GeoBounds) {
   return { width: Math.round(spanLon / degreesPerPixel), height: Math.round(spanLat / degreesPerPixel) };
 }
 
-export function lightningFrameUrl(bounds: GeoBounds, width: number, height: number, time?: string) {
+function lightningFrameUrl(bounds: GeoBounds, width: number, height: number, time?: string) {
   const params = new URLSearchParams({
     service: "WMS",
     version: "1.3.0",

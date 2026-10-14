@@ -79,7 +79,6 @@ app/api/                 server proxies και provider validation
 components/              dashboard, map, pointing, horizon, equipment
 lib/providers/           retries, timeouts, cache, Open-Meteo contracts
 lib/geodesy.ts           WGS84 / ECEF / ENU / καμπυλότητα
-lib/storm-detection.ts   deduplication, DBSCAN-like clustering, motion
 lib/terrain.ts           visibility classification
 lib/astronomy.ts         SunCalc adapter
 lib/camera.ts            sensor/FOV/framing/settings

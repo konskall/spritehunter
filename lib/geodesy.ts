@@ -8,7 +8,7 @@ const MEAN_EARTH_RADIUS_M = 6_371_008.8;
 
 const toRad = (degrees: number) => (degrees * Math.PI) / 180;
 const toDeg = (radians: number) => (radians * 180) / Math.PI;
-export const normalizeDegrees = (value: number) => ((value % 360) + 360) % 360;
+const normalizeDegrees = (value: number) => ((value % 360) + 360) % 360;
 
 export interface EcefPoint {
   x: number;
@@ -37,7 +37,7 @@ export function geodeticToEcef(point: Coordinates): EcefPoint {
   };
 }
 
-export function ecefDeltaToEnu(delta: EcefPoint, observer: Coordinates): EnuPoint {
+function ecefDeltaToEnu(delta: EcefPoint, observer: Coordinates): EnuPoint {
   const lat = toRad(observer.latitude);
   const lon = toRad(observer.longitude);
   const sinLat = Math.sin(lat);
