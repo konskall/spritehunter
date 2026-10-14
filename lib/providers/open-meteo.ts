@@ -67,6 +67,8 @@ const airSchema = z.object({
 
 export type WeatherPayload = z.infer<typeof weatherSchema>;
 const CACHE_TTL_MS = 15 * 60_000;
+// A scan with failed cells is kept only briefly, so the next refresh asks again.
+const PARTIAL_CACHE_TTL_MS = 2 * 60_000;
 const SERVER_ONLY_MESSAGE = tx("Διαθέσιμο μόνο μέσω του server της εφαρμογής (ο πάροχος δεν επιτρέπει κλήσεις από browser).", "Available only through the app's server (the provider does not allow browser requests).");
 // Candidates are only searched over the next 48 h; fetching more only slowed the provider.
 const FORECAST_HOURS = 48;
@@ -82,6 +84,7 @@ interface ForecastBase {
   weatherAlerts: OpportunityResponse["weatherAlerts"];
   payloads: WeatherPayload[];
   screeningFailures: number;
+  screeningError: string | null;
   gridSize: number;
   skySources: { weatherApi: SourceState; openWeather: SourceState };
 }
@@ -579,7 +582,8 @@ async function addCgLightning(candidates: StormCandidate[], clusters: LightningC
   };
 }
 
-const errorDetail = (reason: unknown) => (reason instanceof Error ? reason.message : "unknown error");
+// A timed-out fetch rejects with the bare AbortError message; name it plainly.
+const errorDetail = (reason: unknown) => (reason instanceof Error ? (reason.name === "AbortError" ? "timeout" : reason.message) : "unknown error");
 
 const serverOnlyLightning = (retrievedAt: string): LightningObservation => ({
   status: "unavailable", retrievedAt, latestFrameAt: null, windowMinutes: 0, clusters: [], message: SERVER_ONLY_MESSAGE,
@@ -650,9 +654,10 @@ async function fetchForecastBase(cacheKey: string, observer: Coordinates, minimu
       : unavailableMeteoAlarm(serverOnlySources ? tx("Η επίσημη ροή προειδοποιήσεων δεν ήταν διαθέσιμη.", "The official warnings feed was unavailable.") : SERVER_ONLY_MESSAGE, fetchedAt),
     payloads: screeningResults.flatMap((result) => result.status === "fulfilled" ? result.value : []),
     screeningFailures: screeningResults.filter((result) => result.status === "rejected").length,
+    screeningError: screeningResults.flatMap((result) => result.status === "rejected" ? [errorDetail(result.reason)] : [])[0] ?? null,
     gridSize: grid.length,
   };
-  forecastCache.set(cacheKey, value, CACHE_TTL_MS);
+  forecastCache.set(cacheKey, value, value.screeningFailures ? PARTIAL_CACHE_TTL_MS : CACHE_TTL_MS);
   return value;
 }
 
@@ -670,7 +675,7 @@ export async function fetchOpportunities(
       : Promise.resolve(serverOnlyLightning(new Date().toISOString())),
   ]);
   const nowMs = Date.now();
-  const { fetchedAt, observerForecast, airQuality, aviation, weatherAlerts, payloads, screeningFailures, gridSize, skySources } = base;
+  const { fetchedAt, observerForecast, airQuality, aviation, weatherAlerts, payloads, screeningFailures, screeningError, gridSize, skySources } = base;
   const allTargets = buildTargets(observer, payloads, rawLightning, { observerHours: observerForecast, aviation, minimumKm, maximumKm, fetchedAt, nowMs });
   const xweatherReady = serverOnlySources && xweatherConfigured();
   const darkEnough = skyState(new Date(nowMs), observer.latitude, observer.longitude, 0).sunAltitudeDeg <= CG_MAX_SUN_ALTITUDE_DEG;
@@ -701,7 +706,7 @@ export async function fetchOpportunities(
   const hasLightningPotential = candidates.some((candidate) => candidate.lightningPotentialJkg != null);
   const screeningMessage = screeningFailures === 0
     ? tx(`Πρόγνωση θέσης και ${payloads.length} κυψέλες σάρωσης διαθέσιμες.`, `Observer forecast and ${payloads.length} scan cells available.`)
-    : tx(`Πρόγνωση θέσης διαθέσιμη· απάντησαν ${payloads.length}/${gridSize} κυψέλες σάρωσης (${screeningFailures} αποτυχίες).`, `Observer forecast available; ${payloads.length}/${gridSize} scan cells answered (${screeningFailures} failures).`);
+    : tx(`Πρόγνωση θέσης διαθέσιμη· απάντησαν ${payloads.length}/${gridSize} κυψέλες σάρωσης (${screeningFailures} αποτυχημένα αιτήματα: ${screeningError}). Νέα προσπάθεια στην επόμενη ανανέωση.`, `Observer forecast available; ${payloads.length}/${gridSize} scan cells answered (${screeningFailures} failed requests: ${screeningError}). Retried on the next refresh.`);
   return {
     observer,
     fetchedAt,
