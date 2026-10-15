@@ -8,6 +8,7 @@ import type { Coordinates, EumetsatMetadata, StormCandidate } from "@/lib/domain
 import { destinationPoint } from "@/lib/geodesy";
 import { eumetsatImageUrl, worldPixelToMercator, type EumetsatProduct } from "@/lib/providers/eumetsat";
 import type { Language } from "@/lib/i18n";
+import type { MapLoadState } from "@/components/MapLoader";
 
 interface RadarMetadata {
   host: string;
@@ -28,6 +29,8 @@ interface StormMapProps {
   eumetsat: EumetsatMetadata | null;
   language: Language;
   onSelect: (id: string) => void;
+  /** Called once the base map in view is on screen ("ready"), or when all of it failed. */
+  onBaseMap?: (state: MapLoadState) => void;
 }
 
 interface OverlayView {
@@ -46,9 +49,21 @@ const OVERLAY_MAX_PX = 2048;
 // EUMETView answers 500/504 for large renders under load; ≤1024 px requests are reliable.
 const OVERLAY_MAX_REQUEST_PX = 1024;
 const OVERLAY_MAX_RETRIES = 2;
+// A tile that hangs should not hold the whole map back once others are showing.
+const BASE_MAP_PATIENCE_MS = 10_000;
 
 export function clampMapZoom(zoom: number) {
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
+}
+
+/**
+ * Whether the base map in view is on screen: "ready" once every tile has loaded or failed and
+ * at least one loaded (after a long wait, once any has loaded), "failed" when all failed.
+ */
+export function baseMapState(tileKeys: readonly string[], settled: ReadonlyMap<string, boolean>, waitedLong = false): MapLoadState {
+  const states = tileKeys.map((key) => settled.get(key));
+  if (states.includes(true) && (waitedLong || !states.includes(undefined))) return "ready";
+  return states.length > 0 && states.every((loaded) => loaded === false) ? "failed" : "loading";
 }
 
 function worldPoint(coordinates: Coordinates, zoom: number) {
@@ -81,7 +96,7 @@ function satelliteLabel(eumetsat: EumetsatMetadata | null, language: Language) {
   return `MTG-LI ${athensTime(new Date(eumetsat.lightningTime), language)}`;
 }
 
-export default function StormMap({ observer, candidates, selectedId, radar, radarVisible, lightningVisible, infraredVisible, cloudTopVisible, instabilityVisible, ringsVisible, eumetsat, language, onSelect }: StormMapProps) {
+export default function StormMap({ observer, candidates, selectedId, radar, radarVisible, lightningVisible, infraredVisible, cloudTopVisible, instabilityVisible, ringsVisible, eumetsat, language, onSelect, onBaseMap }: StormMapProps) {
   const t = (el: string, en: string) => (language === "el" ? el : en);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerX: number; pointerY: number; centerX: number; centerY: number } | null>(null);
@@ -165,6 +180,29 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
     };
     return { scale, left, top, tiles, project };
   }, [center, size, zoom]);
+
+  // First open only: report when the base map in view is on screen, then stop tracking tiles,
+  // so panning and zooming never bring the loader back.
+  const settledTiles = useRef(new Map<string, boolean>());
+  const baseMapShown = useRef(false);
+  const [tileEvents, setTileEvents] = useState(0);
+  const [waitedLong, setWaitedLong] = useState(false);
+  const settleTile = (key: string, loaded: boolean) => {
+    if (baseMapShown.current) return;
+    settledTiles.current.set(key, loaded);
+    setTileEvents((count) => count + 1);
+  };
+  useEffect(() => {
+    const timer = setTimeout(() => setWaitedLong(true), BASE_MAP_PATIENCE_MS);
+    return () => clearTimeout(timer);
+  }, []);
+  useEffect(() => {
+    if (baseMapShown.current || !onBaseMap) return;
+    const state = baseMapState(scene.tiles.map((tile) => tile.key), settledTiles.current, waitedLong);
+    if (state === "loading") return;
+    baseMapShown.current = state === "ready";
+    onBaseMap(state);
+  }, [scene.tiles, tileEvents, waitedLong, onBaseMap]);
 
   const satelliteLayers: Array<{ kind: EumetsatProduct; className: string; time: string | null | undefined }> = [
     ...(infraredVisible ? [{ kind: "infrared" as const, className: "satellite-tile", time: eumetsat?.infraredTime }] : []),
@@ -330,8 +368,9 @@ export default function StormMap({ observer, candidates, selectedId, radar, rada
       onDoubleClick={(event) => { if (!(event.target instanceof Element && event.target.closest("[data-map-interactive]"))) changeZoom(1); }}
     >
       <div className="map-tiles" aria-hidden="true">
+        {/* A tile that fails (offline) is hidden rather than drawn as a broken-image icon. */}
         {scene.tiles.map((tile) => (
-          <img key={tile.key} className="map-tile" draggable={false} alt="" src={`https://tile.openstreetmap.org/${zoom}/${tile.x}/${tile.y}.png`} style={{ left: tile.left, top: tile.top }} />
+          <img key={tile.key} className="map-tile" draggable={false} alt="" src={`https://tile.openstreetmap.org/${zoom}/${tile.x}/${tile.y}.png`} onLoad={() => settleTile(tile.key, true)} onError={(event) => { event.currentTarget.hidden = true; settleTile(tile.key, false); }} style={{ left: tile.left, top: tile.top }} />
         ))}
         {overlayView && overlayImages.filter((image) => image.kind !== "lightning" && !overlayFailed(image)).map((image) => (
           <img key={image.src} className={`wms-image ${image.className}`} draggable={false} alt="" src={image.src} onLoad={() => markLoaded(image.src)} onError={() => retryOverlay(image.baseSrc, image.attempt)} style={{ left: overlayView.left - scene.left, top: overlayView.top - scene.top, width: overlayView.width, height: overlayView.height }} />

@@ -14,7 +14,7 @@ import { shouldNotify } from "@/lib/notifications";
 import { athensUtcOffsetMinutes, dataFreshness } from "@/lib/time";
 import { skyState } from "@/lib/astronomy";
 import { parseEumetsatCapabilities } from "@/lib/providers/eumetsat";
-import { clampMapZoom } from "@/components/StormMap";
+import { baseMapState, clampMapZoom } from "@/components/StormMap";
 import { magneticDeclination, normalizeBearing } from "@/lib/wmm";
 import { parseMeteoAlarmFeed } from "@/lib/providers/meteoalarm";
 
@@ -106,6 +106,17 @@ describe("interactive map and EUMETSAT layers", () => {
     expect(clampMapZoom(2)).toBe(3);
     expect(clampMapZoom(6)).toBe(6);
     expect(clampMapZoom(12)).toBe(9);
+  });
+  it("opens the map once every tile in view has loaded or failed", () => {
+    const tiles = ["4-8-5", "4-9-5", "4-8-6"];
+    expect(baseMapState(tiles, new Map([["4-8-5", true]]))).toBe("loading");
+    expect(baseMapState(tiles, new Map([["4-8-5", true], ["4-9-5", false], ["4-8-6", true]]))).toBe("ready");
+    expect(baseMapState(tiles, new Map([["4-8-5", false], ["4-9-5", false], ["4-8-6", false]]))).toBe("failed");
+    // Tiles that left the view (the first render guesses the map size) no longer count.
+    expect(baseMapState(["4-9-5"], new Map([["4-8-5", false], ["4-9-5", true]]))).toBe("ready");
+    // After a long wait the map opens with the tiles it has, but never with none.
+    expect(baseMapState(tiles, new Map([["4-8-5", true]]), true)).toBe("ready");
+    expect(baseMapState(tiles, new Map(), true)).toBe("loading");
   });
   it("parses the latest MTG lightning and infrared timestamps", () => {
     const xml = `<Layer><Name>mtg_fd:li_afa</Name><Dimension name="time" default="2026-10-11T18:15:00Z" /></Layer><Layer><Name>mtg_fd:ir105_hrfi</Name><Dimension name="time" default="2026-10-11T18:10:00Z" /></Layer><Layer><Name>msg_fes:cth</Name><Dimension name="time" default="2026-10-11T18:00:00Z" /></Layer>`;

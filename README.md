@@ -28,7 +28,7 @@ Mobile-first PWA για πρακτικό σχεδιασμό παρατήρηση
 - In-app/browser ειδοποιήσεις όσο η εφαρμογή είναι ανοιχτή (επανέλεγχος ανά 15 λεπτά) με όριο δείκτη, ελάχιστη εμπιστοσύνη, cooldown και ώρες ησυχίας.
 - PWA service worker για offline app shell. Οι ζωντανές API κλήσεις παραμένουν network-only.
 - Συμβατότητα κινητών/PWA: περιθώρια για notch και status bar (iOS «black-translucent», Android edge-to-edge), διάταξη κινητού και σε οριζόντια θέση, χάρτης με ένα δάχτυλο για κύλιση σελίδας και δύο για μετακίνηση/zoom, έλεγχος σε Chromium και WebKit (iPhone/iPad).
-- 129 unit tests για γεωδαισία, καμπυλότητα, ορίζοντα, FOV, προσανατολισμό συσκευής, WMM, αστρονομία, DST, επιλογή στόχου, scoring, METAR, MeteoAlarm, αποκωδικοποίηση PNG, ομαδοποίηση κεραυνών MTG-LI, ειδοποιήσεις, cache, rate limiting, επικύρωση εισόδων και cache headers του API.
+- 130 unit tests για γεωδαισία, καμπυλότητα, ορίζοντα, FOV, προσανατολισμό συσκευής, WMM, αστρονομία, DST, επιλογή στόχου, scoring, METAR, MeteoAlarm, αποκωδικοποίηση PNG, ομαδοποίηση κεραυνών MTG-LI, ειδοποιήσεις, cache, rate limiting, επικύρωση εισόδων και cache headers του API.
 
 ## Γρήγορη εκκίνηση
 
