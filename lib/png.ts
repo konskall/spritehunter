@@ -22,14 +22,15 @@ function paeth(a: number, b: number, c: number) {
 }
 
 /**
- * Decodes the 8-bit, non-interlaced PNGs that WMS servers return (RGBA, RGB or
- * palette) using only platform APIs, so it runs in Workers, Node and browsers.
+ * Decodes the non-interlaced PNGs that WMS servers return (8-bit RGBA or RGB, palette
+ * at 1, 2, 4 or 8 bits) using only platform APIs, so it runs in Workers, Node and browsers.
  */
 export async function decodePng(bytes: Uint8Array): Promise<RgbaImage> {
   if (bytes.length < 8 || SIGNATURE.some((value, index) => bytes[index] !== value)) throw new Error("Not a PNG image.");
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let width = 0;
   let height = 0;
+  let bitDepth = 0;
   let colorType = -1;
   let palette: Uint8Array | null = null;
   let transparency: Uint8Array | null = null;
@@ -44,9 +45,11 @@ export async function decodePng(bytes: Uint8Array): Promise<RgbaImage> {
     if (type === "IHDR") {
       width = view.getUint32(start);
       height = view.getUint32(start + 4);
-      const bitDepth = body[8];
+      bitDepth = body[8];
       colorType = body[9];
-      if (bitDepth !== 8 || body[12] !== 0 || ![2, 3, 6].includes(colorType)) {
+      // GeoServer packs a frame with few colours tighter: an empty MTG-LI frame is 1-bit.
+      const depthOk = colorType === 3 ? [1, 2, 4, 8].includes(bitDepth) : bitDepth === 8;
+      if (!depthOk || body[12] !== 0 || ![2, 3, 6].includes(colorType)) {
         throw new Error(`Unsupported PNG format (bit depth ${bitDepth}, colour type ${colorType}, interlace ${body[12]}).`);
       }
     } else if (type === "PLTE") palette = body;
@@ -64,7 +67,8 @@ export async function decodePng(bytes: Uint8Array): Promise<RgbaImage> {
   const raw = await inflate(compressed);
 
   const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 1;
-  const stride = width * channels;
+  // Below 8 bits several pixels share a byte and the filters still step one byte at a time.
+  const stride = Math.ceil((width * channels * bitDepth) / 8);
   if (raw.length < height * (stride + 1)) throw new Error("Truncated PNG image data.");
   const pixels = new Uint8Array(height * stride);
   // One tight loop per filter type: a per-byte branch on the filter was ~4× slower.
@@ -119,6 +123,18 @@ export async function decodePng(bytes: Uint8Array): Promise<RgbaImage> {
     }
     return { width, height, data };
   }
+  // Unpack 1-, 2- and 4-bit indices: leftmost pixel in the high bits, each row starts on a new byte.
+  let indices = pixels;
+  if (bitDepth < 8) {
+    indices = new Uint8Array(count);
+    const mask = (1 << bitDepth) - 1;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const bit = x * bitDepth;
+        indices[y * width + x] = (pixels[y * stride + (bit >> 3)] >> (8 - bitDepth - (bit & 7))) & mask;
+      }
+    }
+  }
   // Expand the palette to RGBA once, then copy one 32-bit word per pixel. Creating a
   // subarray per pixel made this loop the slowest part of decoding (13.5 ms → 2.5 ms).
   const rgba = new Uint8Array(256 * 4);
@@ -130,6 +146,6 @@ export async function decodePng(bytes: Uint8Array): Promise<RgbaImage> {
   }
   const words = new Uint32Array(rgba.buffer);
   const output = new Uint32Array(data.buffer);
-  for (let index = 0; index < count; index += 1) output[index] = words[pixels[index]];
+  for (let index = 0; index < count; index += 1) output[index] = words[indices[index]];
   return { width, height, data };
 }

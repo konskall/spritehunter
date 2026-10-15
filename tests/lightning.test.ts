@@ -21,9 +21,10 @@ function chunk(type: string, data: Uint8Array) {
   return out;
 }
 
-function encodePng(width: number, height: number, pixels: Uint8Array, colorType: 2 | 3 | 6, extra: Uint8Array[] = []) {
+/** `pixels` holds the scanline bytes; below 8 bits they are already packed (see packRows). */
+function encodePng(width: number, height: number, pixels: Uint8Array, colorType: 2 | 3 | 6, extra: Uint8Array[] = [], bitDepth = 8) {
   const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 1;
-  const stride = width * channels;
+  const stride = Math.ceil((width * channels * bitDepth) / 8);
   const raw = new Uint8Array(height * (stride + 1));
   for (let y = 0; y < height; y += 1) {
     const filter = y % 5; // exercise None, Sub, Up, Average and Paeth
@@ -43,13 +44,29 @@ function encodePng(width: number, height: number, pixels: Uint8Array, colorType:
   const view = new DataView(header.buffer);
   view.setUint32(0, width);
   view.setUint32(4, height);
-  header.set([8, colorType, 0, 0, 0], 8);
+  header.set([bitDepth, colorType, 0, 0, 0], 8);
   const parts = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), ...extra, chunk("IDAT", deflateSync(raw)), chunk("IEND", new Uint8Array())];
   const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
   let offset = 0;
   for (const part of parts) { out.set(part, offset); offset += part.length; }
   return out;
 }
+
+/** Packs palette indices into PNG rows: leftmost pixel in the high bits, each row padded to a byte. */
+function packRows(width: number, height: number, indices: Uint8Array, bitDepth: number) {
+  const stride = Math.ceil((width * bitDepth) / 8);
+  const rows = new Uint8Array(height * stride);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      rows[y * stride + Math.floor((x * bitDepth) / 8)] |= indices[y * width + x] << (8 - bitDepth - ((x * bitDepth) % 8));
+    }
+  }
+  return rows;
+}
+
+// The frame view.eumetsat.int returned for Greece at 14:50 UTC on 15 Oct 2026, with no lightning:
+// 425 × 325, 1-bit palette of two transparent entries.
+const EMPTY_MTG_FRAME = "iVBORw0KGgoAAAANSUhEUgAAAakAAAFFAQMAAABsZIDhAAAABlBMVEX///////9VfPVsAAAAAnRSTlMAAHaTzTgAAADDSURBVHhe7dKxCQBACARB7b/pL2Azs4cxXDAZbud0e/oab3FDgiQCCVaCJAIJVoIkAglWgiQCCVaCJAIJVoIkAglWgiQCCVaCJAIJVoIkAglWgiQCCVaCJAIJVoIkAglWgiQCCVaCJAIJVoIkAglWgiQCCVaCJAIJVoIkAglWgiQCCVaCJAIJVoIkAglWgiQCCVaCJAIJVoIkAglWgiQCCVaCJAIJVoIkAglWgiQCCVaCJAIJVoIkAglWgiQCCVbyJ8kDvcABRnSNaUwAAAAASUVORK5CYII=";
 
 describe("PNG decoding", () => {
   it("decodes 8-bit RGBA with every scanline filter", async () => {
@@ -71,6 +88,27 @@ describe("PNG decoding", () => {
     const transparency = chunk("tRNS", Uint8Array.from([0]));
     const indexed = await decodePng(encodePng(2, 1, Uint8Array.from([0, 1]), 3, [palette, transparency]));
     expect(Array.from(indexed.data)).toEqual([0, 0, 0, 0, 177, 1, 38, 255]);
+  });
+
+  it("unpacks 1-, 2- and 4-bit palette rows, skipping the padding bits at each row end", async () => {
+    // Entry i is (15i, 15i + 5, 15i + 10). Width 5 never fills the last byte of a row.
+    const palette = chunk("PLTE", Uint8Array.from({ length: 16 * 3 }, (_, index) => index * 5));
+    const width = 5;
+    const height = 5;
+    for (const bitDepth of [1, 2, 4]) {
+      const indices = Uint8Array.from({ length: width * height }, (_, index) => (index * 7 + 3) % (1 << bitDepth));
+      const image = await decodePng(encodePng(width, height, packRows(width, height, indices, bitDepth), 3, [palette], bitDepth));
+      expect(image.width).toBe(width);
+      expect(Array.from(image.data)).toEqual(Array.from(indices).flatMap((entry) => [entry * 15, entry * 15 + 5, entry * 15 + 10, 255]));
+    }
+  });
+
+  it("reads the empty 1-bit frame MTG-LI sends when there is no lightning", async () => {
+    const image = await decodePng(Uint8Array.from(Buffer.from(EMPTY_MTG_FRAME, "base64")));
+    expect([image.width, image.height]).toEqual([425, 325]);
+    expect(image.data.every((value, index) => index % 4 !== 3 || value === 0)).toBe(true);
+    const frame = { time: "2026-10-15T14:50:00.000Z", image };
+    expect(clusterLightningFrames([frame], { west: 14, south: 31, east: 31, north: 44 }, Date.parse(frame.time))).toEqual([]);
   });
 
   it("rejects data that is not a PNG", async () => {
