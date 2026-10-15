@@ -410,7 +410,7 @@ button, a, label, select, [role="button"] { touch-action: manipulation; }
 .horizon-caption strong { color: var(--red-soft); }
 .sky-key { display: flex; flex-wrap: wrap; gap: 15px; padding: 10px 15px; border-top: 1px solid var(--line); }
 .sky-key span { color: var(--muted); font-size: 10.5px; display: flex; align-items: center; gap: 6px; }
-.sky-key i { width: 13px; height: 8px; display: inline-block; } .key-tle { background: rgba(240,67,98,.3); border: 1px solid var(--red-soft); } .key-fov { border: 1px dashed var(--mint); } .key-terrain { background: #344b50; }
+.sky-key i { width: 13px; height: 8px; display: inline-block; } .key-tle { background: rgba(240,67,98,.3); border: 1px solid var(--red-soft); } .key-jets { background: rgba(90,169,255,.24); border: 1px dashed #8cc4ff; } .key-fov { border: 1px dashed var(--mint); } .key-terrain { background: #344b50; }
 
 .aurora-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(310px, .75fr); gap: 18px; align-items: start; }
 .aurora-status { display: grid; grid-template-columns: 120px 1fr; gap: 22px; align-items: center; min-height: 280px; background: radial-gradient(circle at 8% 40%, rgba(125,228,202,.12), transparent 15rem), linear-gradient(145deg, #0c1b2b, #09151f); }

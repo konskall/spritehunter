@@ -1,8 +1,15 @@
 import * as SunCalc from "suncalc";
 import { angularDifference } from "@/lib/geodesy";
 
+// SunCalc adds the horizon refraction (Meeus 16.4 at 0°, ≈0.484°) to every altitude below the
+// horizon. Twilight is defined on the Sun's true altitude, so it is taken off again there;
+// otherwise each twilight stage started 2.5–4 minutes late.
+const HORIZON_REFRACTION_DEG = (0.0002967 / Math.tan(0.00312536 / 0.08901179)) * (180 / Math.PI);
+const trueSunAltitude = (apparentDeg: number) => (apparentDeg < HORIZON_REFRACTION_DEG ? apparentDeg - HORIZON_REFRACTION_DEG : apparentDeg);
+
 export function skyState(date: Date, latitude: number, longitude: number, targetBearingDeg?: number) {
-  const sun = SunCalc.getPosition(date, latitude, longitude);
+  const position = SunCalc.getPosition(date, latitude, longitude);
+  const sun = { ...position, altitude: trueSunAltitude(position.altitude) };
   const moon = SunCalc.getMoonPosition(date, latitude, longitude);
   const illumination = SunCalc.getMoonIllumination(date);
   const moonSeparationDeg = targetBearingDeg == null ? null : angularDifference(moon.azimuth, targetBearingDeg);

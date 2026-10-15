@@ -114,6 +114,8 @@ export interface CgLightning {
   negativeCount: number;
   /** Peak current of the strongest positive stroke in kA, when reported. */
   maxPositiveKa: number | null;
+  /** Peak current of the strongest negative stroke in kA (as a positive number), when reported. */
+  maxNegativeKa?: number | null;
   retrievedAt: string;
 }
 
@@ -150,6 +152,8 @@ export interface CandidateScoreInput {
   /** How many independent forecasts gave the observer's total cloud, and how far apart they were. */
   observerCloudSources?: number;
   observerCloudSpread?: number | null;
+  /** Forecast cloud in the layer the line of sight crosses 40–90 km towards the target. */
+  pathCloudPercent?: number | null;
   distanceKm: number;
   sunAltitudeDeg: number;
   moonInterference: boolean;

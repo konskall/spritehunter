@@ -40,3 +40,6 @@ next-env.d.ts
 
 # browser-test output
 /.playwright-mcp/
+
+# downloads of the target verification (npm run verify)
+/.verify-cache/

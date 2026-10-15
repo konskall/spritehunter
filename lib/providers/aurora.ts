@@ -21,19 +21,35 @@ function longitudeDifference(a: number, b: number) {
   return Math.abs(((a - b + 540) % 360) - 180);
 }
 
+// Aurora ~300 km up stands ≥3° above the horizon out to ~1,600 km (it sets at ~1,900 km).
+// The OVATION oval beyond that, usually over Lapland, cannot be seen from Greece at all.
+const VISIBLE_RANGE_KM = 1_600;
+// OVATION gives the chance of aurora overhead; ≥10 % near the edge of view is a real chance of a glow low in the north.
+const VISIBLE_PROBABILITY = 10;
+const EARTH_RADIUS_KM = 6_371;
+const toRad = (degrees: number) => (degrees * Math.PI) / 180;
+
+function greatCircleKm(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const h = Math.sin(toRad(lat2 - lat1) / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(toRad(lon2 - lon1) / 2) ** 2;
+  return 2 * EARTH_RADIUS_KM * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
 export function assessAurora(kp: number | null, coordinates: OvationPoint[], latitude: number, longitude: number) {
   let local: number | null = null;
   let northern: number | null = null;
+  const maxLatitudeOffset = VISIBLE_RANGE_KM / 111;
   for (const [pointLon, pointLat, probability] of coordinates) {
     const lonDiff = longitudeDifference(pointLon, longitude);
     if (Math.abs(pointLat - latitude) <= 2 && lonDiff <= 3) local = Math.max(local ?? 0, probability);
-    if (pointLat >= latitude && pointLat <= Math.min(90, latitude + 35) && lonDiff <= 18) northern = Math.max(northern ?? 0, probability);
+    if (pointLat >= latitude && pointLat - latitude <= maxLatitudeOffset && greatCircleKm(latitude, longitude, pointLat, pointLon) <= VISIBLE_RANGE_KM) {
+      northern = Math.max(northern ?? 0, probability);
+    }
   }
   const level: AuroraResponse["level"] = kp == null
     ? "unknown"
     : kp >= 8 || (local ?? 0) >= 10
       ? "strong"
-      : kp >= 7 || (northern ?? 0) >= 20
+      : kp >= 7 || (northern ?? 0) >= VISIBLE_PROBABILITY
         ? "possible"
         : kp >= 5
           ? "elevated"

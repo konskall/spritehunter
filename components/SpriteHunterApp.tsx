@@ -64,8 +64,9 @@ import { magneticDeclination, normalizeBearing } from "@/lib/wmm";
 import { cameraPointing } from "@/lib/orientation";
 import { parseNumericDraft } from "@/lib/number-input";
 import { rescoreWithTerrain } from "@/lib/scoring";
+import { elevationSpan, jetEnvelope } from "@/lib/pointing";
 import { evaluateAlert, type AlertPreferences } from "@/lib/notifications";
-import { isAlertPrefs, isLanguage, isLastAlert, isLensList, isLocationList, isLogEntry, isLogList, isOrientation, isSavedLocation, isSearchRange, isString } from "@/lib/persisted-validators";
+import { isAlertPrefs, isLanguage, isLastAlert, isLensList, isLocationList, isLogEntry, isLogList, isOrientation, isSavedLocation, isSearchRange, isString, migrateSearchRange } from "@/lib/persisted-validators";
 import MapLoader, { type MapLoadState } from "@/components/MapLoader";
 import { PwaInstallButton } from "@/components/PwaRegister";
 import { tx, type Language, type Localized } from "@/lib/i18n";
@@ -139,6 +140,8 @@ const navItems: Array<{ id: Screen; label: string; labelEn: string; icon: Lucide
 const DEFAULT_ALERT_PREFS: AlertPreferences = { minimumScore: 60, confidence: "medium", cooldown: 90, quietStart: "01:00", quietEnd: "08:00" };
 // Without observed lightning the score is capped at 69; only MTG-LI storms can go higher.
 const MAX_FORECAST_SCORE = 69;
+// The range used to be stored under this key, with 200–600 km as its default.
+const RANGE_LEGACY = { key: "spritehunter.range", migrate: migrateSearchRange };
 const AUTO_REFRESH_MS = 15 * 60_000;
 // Phones pause timers in the background; back on screen, older data is rescanned at once.
 const RETURN_REFRESH_MS = 5 * 60_000;
@@ -189,11 +192,37 @@ function useLanguage(initial: Language) {
 }
 
 /** localStorage-backed state; `hydrated` turns true once the stored value has been read. */
-function usePersistedState<T>(key: string, fallback: T, validate?: (value: unknown) => value is T) {
+/** A value stored under an older key, carried over once (and removed) when the new key is empty. */
+interface LegacySetting<T> {
+  key: string;
+  migrate: (value: unknown) => T | null;
+}
+
+function takeLegacy<T>(newKey: string, legacy: LegacySetting<T>): T | null {
+  try {
+    if (window.localStorage.getItem(newKey) != null) return null;
+    const raw = window.localStorage.getItem(legacy.key);
+    if (raw == null) return null;
+    const migrated = legacy.migrate(JSON.parse(raw));
+    // Written at once, so a second run of the effect (React Strict Mode) reads it back
+    // instead of finding both keys empty and falling back to the default.
+    if (migrated != null) window.localStorage.setItem(newKey, JSON.stringify(migrated));
+    window.localStorage.removeItem(legacy.key);
+    return migrated;
+  } catch {
+    return null;
+  }
+}
+
+function usePersistedState<T>(key: string, fallback: T, validate?: (value: unknown) => value is T, legacy?: LegacySetting<T>) {
   const [state, setState] = useState({ value: fallback, hydrated: false });
   const fallbackRef = useRef(fallback);
   const validateRef = useRef(validate);
-  useEffect(() => setState({ value: safeRead(key, fallbackRef.current, validateRef.current), hydrated: true }), [key]);
+  const legacyRef = useRef(legacy);
+  useEffect(() => {
+    const carried = legacyRef.current ? takeLegacy(key, legacyRef.current) : null;
+    setState({ value: carried ?? safeRead(key, fallbackRef.current, validateRef.current), hydrated: true });
+  }, [key]);
   useEffect(() => {
     if (!state.hydrated) return;
     try { window.localStorage.setItem(key, JSON.stringify(state.value)); } catch { /* Storage can be disabled. */ }
@@ -279,10 +308,16 @@ function categoryLabel(candidate: StormCandidate | null, language: Language) {
 const areaText = (km2: number, language: Language) => Math.round(km2).toLocaleString(language === "el" ? "el-GR" : "en-GB");
 
 /** Short Xweather CG summary, e.g. "+CG 3 (έως +87 kA)". */
+// Below this a "positive ground stroke" is often an intra-cloud pulse (see lib/scoring); from
+// ELVES_KA on, a stroke of either polarity can drive ELVES and halos.
+const MIN_POSITIVE_KA = 15;
+const ELVES_KA = 100;
+
 function cgLine(cg: CgLightning | null | undefined, language: Language) {
   if (!cg) return null;
-  if (cg.positiveCount) return `+CG ${cg.positiveCount}${cg.maxPositiveKa != null ? ` (${L(language, "έως", "up to")} +${cg.maxPositiveKa} kA)` : ""}`;
-  return cg.cgCount ? L(language, `μόνο −CG (${cg.cgCount})`, `only −CG (${cg.cgCount})`) : L(language, "χωρίς CG", "no CG");
+  const strongNegative = (cg.maxNegativeKa ?? 0) >= ELVES_KA ? ` · −${cg.maxNegativeKa} kA` : "";
+  if (cg.positiveCount) return `+CG ${cg.positiveCount}${cg.maxPositiveKa != null ? ` (${L(language, "έως", "up to")} +${cg.maxPositiveKa} kA)` : ""}${strongNegative}`;
+  return cg.cgCount ? `${L(language, `μόνο −CG (${cg.cgCount})`, `only −CG (${cg.cgCount})`)}${strongNegative}` : L(language, "χωρίς CG", "no CG");
 }
 
 function lightningLine(candidate: StormCandidate, language: Language) {
@@ -310,15 +345,23 @@ function targetDescription(candidate: StormCandidate, language: Language) {
       `The MTG-LI satellite records lightning over ~${area} km² there (latest ${detail.ageMinutes}′ ago, in ${detail.frames} of ${detail.windowMinutes / 5} five-minute frames).`);
     const cg = detail.cg;
     if (!cg) return `${lit} ${L(language, "Η καταιγίδα είναι πραγματική· το MTG-LI όμως δεν διακρίνει +CG ή πολικότητα.", "The storm is real, but MTG-LI cannot tell +CG strokes or polarity.")}`;
-    if (cg.positiveCount) {
-      const strongest = cg.maxPositiveKa != null ? L(language, `, τον ισχυρότερο στα +${cg.maxPositiveKa} kA`, `, the strongest at +${cg.maxPositiveKa} kA`) : "";
+    const elves = (cg.maxNegativeKa ?? 0) >= ELVES_KA
+      ? ` ${L(language, `Ένας αρνητικός κεραυνός −${cg.maxNegativeKa} kA είναι αρκετά ισχυρός για ELVES και halos.`, `A −${cg.maxNegativeKa} kA negative stroke is strong enough for ELVES and halos.`)}`
+      : "";
+    if (cg.positiveCount && (cg.maxPositiveKa ?? 0) >= MIN_POSITIVE_KA) {
+      const strong = (cg.maxPositiveKa ?? 0) >= 50;
       return `${lit} ${L(language,
-        `Το Xweather μετρά ${cg.positiveCount} θετικούς κεραυνούς +CG τα τελευταία ${cg.windowMinutes}′${strongest}: αυτοί προκαλούν τα sprites.`,
-        `Xweather counts ${cg.positiveCount} positive +CG strokes in the last ${cg.windowMinutes}′${strongest}: these trigger sprites.`)}`;
+        `Το Xweather μετρά ${cg.positiveCount} θετικούς κεραυνούς +CG τα τελευταία ${cg.windowMinutes}′, τον ισχυρότερο στα +${cg.maxPositiveKa} kA${strong ? ": τόσο ισχυροί +CG είναι ο κύριος εκκινητής των sprites." : "· οι ισχυρότεροι από +50 kA είναι ο κύριος εκκινητής των sprites."}`,
+        `Xweather counts ${cg.positiveCount} positive +CG strokes in the last ${cg.windowMinutes}′, the strongest at +${cg.maxPositiveKa} kA${strong ? ": +CG strokes this strong are the main trigger of sprites." : "; strokes above +50 kA are the main trigger of sprites."}`)}${elves}`;
+    }
+    if (cg.positiveCount) {
+      return `${lit} ${L(language,
+        `Το Xweather μετρά μόνο ασθενείς θετικούς κεραυνούς (κάτω από ${MIN_POSITIVE_KA} kA) τα τελευταία ${cg.windowMinutes}′· συχνά είναι ενδονεφικοί, όχι κεραυνοί προς το έδαφος.`,
+        `Xweather counts only weak positive strokes (below ${MIN_POSITIVE_KA} kA) in the last ${cg.windowMinutes}′; these are often intra-cloud, not ground strokes.`)}${elves}`;
     }
     return `${lit} ${L(language,
       `Το Xweather δεν βρίσκει θετικούς κεραυνούς +CG τα τελευταία ${cg.windowMinutes}′ (${cg.cgCount} αρνητικοί CG)· τα sprites χρειάζονται κυρίως θετικούς.`,
-      `Xweather finds no positive +CG strokes in the last ${cg.windowMinutes}′ (${cg.cgCount} negative CG); sprites mostly need positive ones.`)}`;
+      `Xweather finds no positive +CG strokes in the last ${cg.windowMinutes}′ (${cg.cgCount} negative CG); sprites mostly need positive ones.`)}${elves}`;
   }
   if (candidate.scoreInput.lightning === "not_detected") {
     return L(language,
@@ -326,8 +369,8 @@ function targetDescription(candidate: StormCandidate, language: Language) {
       "The model forecasts a storm for this hour, but MTG-LI sees no lightning there now. The forecast is not confirmed.");
   }
   return L(language,
-    "Μακρινή περιοχή μοντέλου με συνδυασμό αστάθειας και υετού. Απαιτείται επιβεβαίωση κεραυνικής δραστηριότητας πριν θεωρηθεί ενεργή καταιγίδα.",
-    "A distant model area with instability and precipitation. Lightning has to be confirmed before it counts as an active storm.");
+    `Το μοντέλο δίνει καταιγίδα με βροχή σε αυτή την περιοχή. Η θέση της είναι αβέβαιη κατά ~${candidate.uncertaintyKm} km: η κατεύθυνση είναι ενδεικτική ως την επιβεβαίωση από το MTG-LI.`,
+    `The model gives a storm with rain in this area. Its position is uncertain by ~${candidate.uncertaintyKm} km: the direction is only a guide until MTG-LI confirms it.`);
 }
 
 function alertBody(candidate: StormCandidate, language: Language) {
@@ -404,7 +447,8 @@ export default function SpriteHunterApp({ initialLanguage }: { initialLanguage: 
   const [selectedLensId, setSelectedLensId] = usePersistedState("spritehunter.selected-lens.v2", "tokina-atxi-11-16", isString);
   const [orientation, setOrientation] = usePersistedState<"landscape" | "portrait">("spritehunter.orientation", "landscape", isOrientation);
   const [logs, setLogs] = usePersistedState<LogEntry[]>("spritehunter.logs", [], isLogList);
-  const [range, setRange, rangeHydrated] = usePersistedState("spritehunter.range", { min: 200, max: 600 }, isSearchRange);
+  // Real sprites were photographed over storms 80–200 km away, so the scan now starts at 100 km.
+  const [range, setRange, rangeHydrated] = usePersistedState("spritehunter.range.v2", { min: 100, max: 600 }, isSearchRange, RANGE_LEGACY);
   const [alertPrefs, setAlertPrefs] = usePersistedState<AlertPreferences>("spritehunter.alerts", DEFAULT_ALERT_PREFS, isAlertPrefs);
   const [lastAlert, setLastAlert] = usePersistedState<{ at: string; score: number } | null>("spritehunter.last-alert", null, isLastAlert);
   const [data, setData] = useState<OpportunityResponse | null>(null);
@@ -462,8 +506,10 @@ export default function SpriteHunterApp({ initialLanguage }: { initialLanguage: 
   const selectedLens = lenses.find((lens) => lens.id === selectedLensId) ?? lenses[0];
   const fov = fieldOfView(CANON_750D, selectedLens.focalLengthMm, orientation);
   const uncertaintyAngle = selected ? (Math.atan2(selected.uncertaintyKm, selected.distanceKm) * 180) / Math.PI * 2 : 0;
-  const framing = selected
-    ? framingAssessment(fov.horizontalDeg, fov.verticalDeg, uncertaintyAngle, selected.pointing[0].elevationDeg, selected.pointing.at(-1)!.elevationDeg)
+  // The frame must hold sprite bottoms seen from the far edge and tops from the near edge.
+  const span = selected ? elevationSpan(observer, selected) : null;
+  const framing = selected && span
+    ? framingAssessment(fov.horizontalDeg, fov.verticalDeg, uncertaintyAngle, span.lowDeg, span.highDeg)
     : null;
   const currentSky = selected ? skyState(new Date(selected.forecastValidAt), observer.latitude, observer.longitude, selected.bearingDeg) : null;
 
@@ -699,7 +745,7 @@ export default function SpriteHunterApp({ initialLanguage }: { initialLanguage: 
           {screen === "map" && <MapView candidates={candidates} selected={selected} observer={observer} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onRadar={setRadarVisible} onLightning={setLightningVisible} onInfrared={setInfraredVisible} onCloudTop={setCloudTopVisible} onInstability={setInstabilityVisible} onRings={setRingsVisible} onSelect={selectCandidate} onPoint={goPoint} />}
           {screen === "forecast" && <ForecastView candidates={candidates} selected={selected} onSelect={selectCandidate} onPoint={goPoint} />}
           {screen === "point" && <PointView candidate={selected} observer={observer} lens={selectedLens} fov={fov} framing={framing} terrain={terrain} terrainLoading={terrainLoading && !terrain} sky={currentSky} language={language} />}
-          {screen === "sky" && <SkyView candidate={selected} terrain={terrain} fov={fov} lens={selectedLens} orientation={orientation} sky={currentSky} onOrientation={setOrientation} />}
+          {screen === "sky" && <SkyView candidate={selected} observer={observer} terrain={terrain} fov={fov} lens={selectedLens} orientation={orientation} sky={currentSky} onOrientation={setOrientation} />}
           {screen === "aurora" && <AuroraView aurora={aurora} loading={auroraLoading} lens={selectedLens} observer={site} forecast={data?.observerForecast ?? []} />}
           {screen === "locations" && <LocationsView observer={site} locations={siteList} candidate={selected} onObserver={setObserver} onLocations={setLocations} />}
           {screen === "camera" && <CameraView candidate={selected} lenses={lenses} selectedLens={selectedLens} fov={fov} framing={framing} orientation={orientation} sky={currentSky} onSelect={setSelectedLensId} onLenses={setLenses} onOrientation={setOrientation} />}
@@ -788,7 +834,7 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
             <button key={candidate.id} className={`candidate-row ${selected?.id === candidate.id ? "selected" : ""} ${candidate.observedLightning ? "observed" : ""}`} onClick={() => onSelect(candidate.id)}>
               <span className="rank">0{index + 1}</span><span className="candidate-main"><strong>{candidate.observedLightning && <Zap size={13} className="observed-icon" aria-label={t("Παρατηρημένοι κεραυνοί", "Observed lightning")} />}{directionLabel(candidate.bearingDeg, language)} · {candidate.distanceKm.toFixed(0)} km</strong><small>{lightningLine(candidate, language) ?? formatAthens(candidate.forecastValidAt, language)}{candidate.capeJkg != null || !candidate.observedLightning ? ` · CAPE ${candidate.capeJkg?.toFixed(0) ?? "—"} J/kg` : ""}{candidate.lightningPotentialJkg != null ? ` · LPI ${candidate.lightningPotentialJkg.toFixed(0)}` : ""}</small></span><span className="candidate-score">{candidate.score.total}</span><ChevronRight size={17} />
             </button>
-          ))}{candidates.slice(0, 5).some((candidate) => candidate.observedLightning?.cg) && <p className="credit-line"><XweatherCredit /></p>}</div> : <EmptyState title={loading ? t("Σάρωση σε εξέλιξη", "Scan in progress") : t("Κανένας κατάλληλος στόχος", "No suitable target")} description={t("Το κενό αποτέλεσμα είναι έγκυρο: ούτε κεραυνοί MTG-LI ούτε αρκετό προγνωστικό σήμα στην ακτίνα σάρωσης.", "An empty result is valid: no MTG-LI lightning and not enough forecast signal within the scan range.")} />}
+          ))}{candidates.slice(0, 5).some((candidate) => candidate.observedLightning?.cg) && <p className="credit-line"><XweatherCredit /></p>}{candidates.filter((candidate) => candidate.source === "observed").length >= 2 && <p className="data-note">{t("Τα sprites εμφανίζονται πάνω από όποια ενεργή καταιγίδα δώσει ισχυρό κεραυνό: σε επιβεβαιωμένες λήψεις ήταν συχνά η 2η ή 3η της λίστας. Δες και τις επόμενες.", "Sprites appear over whichever active storm produces a strong stroke: in confirmed photos it was often the 2nd or 3rd on the list. Check the next ones too.")}</p>}</div> : <EmptyState title={loading ? t("Σάρωση σε εξέλιξη", "Scan in progress") : t("Κανένας κατάλληλος στόχος", "No suitable target")} description={t("Το κενό αποτέλεσμα είναι έγκυρο: ούτε κεραυνοί MTG-LI ούτε αρκετό προγνωστικό σήμα στην ακτίνα σάρωσης.", "An empty result is valid: no MTG-LI lightning and not enough forecast signal within the scan range.")} />}
         </section>
 
         <section className="panel timeline-panel">
@@ -881,7 +927,7 @@ function ForecastView({ candidates, selected, onSelect, onPoint }: { candidates:
     { label: t("Δραστηριότητα", "Activity"), hint: t("κεραυνοί MTG-LI, +CG ή αστάθεια μοντέλου", "MTG-LI lightning, +CG or model instability"), value: selected.score.activity, max: 35 },
     { label: t("Ατμόσφαιρα", "Atmosphere"), hint: t("νέφωση και ορατότητα στη θέση σου", "cloud and visibility at your location"), value: selected.score.atmosphere, max: 30 },
     { label: t("Έδαφος", "Terrain"), hint: t("ορίζοντας DEM προς τον στόχο", "DEM horizon towards the target"), value: selected.score.terrain, max: 20 },
-    { label: t("Απόσταση", "Distance"), hint: t("ιδανικά 250–550 km", "ideally 250–550 km"), value: selected.score.distance, max: 10 },
+    { label: t("Απόσταση", "Distance"), hint: t("ιδανικά 100–300 km", "ideally 100–300 km"), value: selected.score.distance, max: 10 },
     { label: t("Σκοτάδι", "Darkness"), hint: t("ύψος ήλιου και σελήνη", "Sun altitude and Moon"), value: selected.score.darkness, max: 5 },
   ] : [];
   return (
@@ -1022,6 +1068,11 @@ function PointView({ candidate, observer, lens, fov, framing, terrain, terrainLo
   const targetMin = (candidate.bearingDeg - targetHalfWidth + 360) % 360;
   const targetMax = (candidate.bearingDeg + targetHalfWidth) % 360;
   const visibility = terrainVisibility(terrain, candidate.pointing);
+  // Blue and gigantic jets start at the cloud top: only the part above the horizon can be framed.
+  const jets = jetEnvelope(observer, candidate.coordinates);
+  const jetHorizon = Math.max(0, terrain?.horizonAngleDeg ?? 0);
+  const visibleJets = jets.filter((point) => point.elevationDeg > jetHorizon);
+  const frameSpan = elevationSpan(observer, candidate);
   const declination = magneticDeclination(observer.latitude, observer.longitude, observer.elevationM ?? 0);
   const effectiveHeading = heading == null ? manualHeading : normalizeBearing(heading + (applyDeclination ? declination : 0));
   const horizontalError = signedAngle(candidate.bearingDeg, effectiveHeading);
@@ -1053,21 +1104,25 @@ function PointView({ candidate, observer, lens, fov, framing, terrain, terrainLo
       <p className="sensor-note">{pick(cameraMessage)} {pick(sensorMessage)}</p>
       <label className="wmm-toggle"><input type="checkbox" checked={applyDeclination} onChange={(event) => setApplyDeclination(event.target.checked)} disabled={heading == null} /><span><strong>{t("Διόρθωση", "Correction")} WMM2025 {declination >= 0 ? "+" : ""}{declination.toFixed(1)}°</strong> {t("από μαγνητικό σε αληθή βορρά. Απενεργοποίησέ την μόνο αν η συσκευή σου δίνει ήδη αληθές αζιμούθιο.", "from magnetic to true north. Turn it off only if your device already gives a true azimuth.")}</span></label>
       <div className="manual-guidance"><label>{t("Αζιμούθιο συσκευής", "Device azimuth")} <strong>{effectiveHeading.toFixed(0)}°</strong><input type="range" min="0" max="359" value={Math.round(effectiveHeading) % 360} onChange={(event) => { setHeading(null); setManualHeading(Number(event.target.value)); }} /></label><label>{t("Ανύψωση κάμερας", "Camera elevation")} <strong>{elevation.toFixed(0)}°</strong><input type="range" min="-10" max="90" value={Math.round(elevation)} onChange={(event) => setElevation(Number(event.target.value))} /></label></div>
-      <div className="point-grid"><div><span>{t("Οριζόντιος τομέας", "Horizontal sector")}</span><strong>{targetMin.toFixed(1)}° → {targetMax.toFixed(1)}°</strong></div><div><span>{t("Χρήσιμη ανύψωση", "Useful elevation")}</span><strong>{minElevation.toFixed(1)}° → {maxElevation.toFixed(1)}°</strong></div><div><span>{t("Ορίζοντας εδάφους", "Terrain horizon")}</span><strong>{terrainLoading ? t("υπολογισμός…", "computing…") : terrain?.horizonAngleDeg != null ? `${terrain.horizonAngleDeg.toFixed(1)}°` : t("μη επαληθευμένος", "unverified")}</strong></div><div><span>{t("Ορατό εύρος TLE", "Visible TLE range")}</span><strong>{visibility.status === "clear" ? "50–90 km" : visibility.status === "partial" ? `${visibility.visibleAltitudesKm[0]}–${visibility.visibleAltitudesKm.at(-1)} km` : visibility.status === "blocked" ? t("Αποκλεισμένο", "Blocked") : t("Άγνωστο", "Unknown")}</strong></div></div>
+      <div className="point-grid"><div><span>{t("Οριζόντιος τομέας", "Horizontal sector")}</span><strong>{targetMin.toFixed(1)}° → {targetMax.toFixed(1)}°</strong></div><div><span>{t("Χρήσιμη ανύψωση", "Useful elevation")}</span><strong>{minElevation.toFixed(1)}° → {maxElevation.toFixed(1)}°</strong></div><div><span>{t("Ορίζοντας εδάφους", "Terrain horizon")}</span><strong>{terrainLoading ? t("υπολογισμός…", "computing…") : terrain?.horizonAngleDeg != null ? `${terrain.horizonAngleDeg.toFixed(1)}°` : t("μη επαληθευμένος", "unverified")}</strong></div><div><span>{t("Ορατό εύρος TLE", "Visible TLE range")}</span><strong>{visibility.status === "clear" ? "50–90 km" : visibility.status === "partial" ? `${visibility.visibleAltitudesKm[0]}–${visibility.visibleAltitudesKm.at(-1)} km` : visibility.status === "blocked" ? t("Αποκλεισμένο", "Blocked") : t("Άγνωστο", "Unknown")}</strong></div><div><span>{t("Ζώνη jets (15–50 km)", "Jet band (15–50 km)")}</span><strong>{visibleJets.length ? `${visibleJets[0].elevationDeg.toFixed(1)}° → ${jets.at(-1)!.elevationDeg.toFixed(1)}°${visibleJets.length < jets.length ? t(` · από ${visibleJets[0].altitudeKm} km`, ` · from ${visibleJets[0].altitudeKm} km`) : ""}` : t("Κάτω από τον ορίζοντα", "Below the horizon")}</strong></div></div>
     </section>
-    <aside className="point-sidebar"><section className="panel compact"><span className="eyebrow">FRAME CHECK</span><h2>{lens.name}</h2><div className="fov-visual"><div className="fov-frame"><div className="target-band" style={{ width: `${bandWidthPercent}%`, height: `${Math.min(80, Math.max(4, ((maxElevation - minElevation) / fov.verticalDeg) * 100))}%` }} /></div></div><div className="fov-values"><span>{t("Οριζόντια", "Horizontal")} <strong>{fov.horizontalDeg.toFixed(1)}°</strong></span><span>{t("Κάθετα", "Vertical")} <strong>{fov.verticalDeg.toFixed(1)}°</strong></span></div><p className={framing?.fits ? "fit-ok" : "fit-warn"}>{framing?.fits ? t("Η εκτιμώμενη περιοχή χωρά με περιθώριο στο κάδρο.", "The estimated area fits the frame with margin.") : t("Η αβεβαιότητα δεν χωρά άνετα. Προτίμησε ευρύτερο φακό.", "The uncertainty does not fit comfortably. Prefer a wider lens.")}</p></section><section className="panel compact"><span className="eyebrow">FIELD SETTINGS</span>{Object.entries(recommendation).filter(([key]) => key in SETTING_LABELS).map(([key, value]) => <div className="setting-row" key={key}><span>{pick(SETTING_LABELS[key])}</span><strong>{value}</strong></div>)}</section><section className="safety-card"><ShieldAlert size={20} /><div><strong>{t("Προτεραιότητα η ασφάλεια", "Safety first")}</strong><p>{t("Μην παρατηρείς σε εκτεθειμένο σημείο όταν η καταιγίδα πλησιάζει.", "Do not observe from an exposed spot when the storm approaches.")} {candidate.observedLightning ? t("Η καταιγίδα είναι παρατηρημένη από δορυφόρο· η ακριβής θέση των sprites παραμένει αβέβαιη.", "The storm is observed by satellite; the exact position of sprites stays uncertain.") : t("Ο στόχος εδώ είναι προγνωστικός, όχι επιβεβαιωμένος.", "This target is a forecast, not confirmed.")}</p></div></section></aside>
+    <aside className="point-sidebar"><section className="panel compact"><span className="eyebrow">FRAME CHECK</span><h2>{lens.name}</h2><div className="fov-visual"><div className="fov-frame"><div className="target-band" style={{ width: `${bandWidthPercent}%`, height: `${Math.min(80, Math.max(4, ((frameSpan.highDeg - frameSpan.lowDeg) / fov.verticalDeg) * 100))}%` }} /></div></div><div className="fov-values"><span>{t("Οριζόντια", "Horizontal")} <strong>{fov.horizontalDeg.toFixed(1)}°</strong></span><span>{t("Κάθετα", "Vertical")} <strong>{fov.verticalDeg.toFixed(1)}°</strong></span></div><p className={framing?.fits ? "fit-ok" : "fit-warn"}>{framing?.fits ? t("Η εκτιμώμενη περιοχή χωρά με περιθώριο στο κάδρο.", "The estimated area fits the frame with margin.") : t("Η αβεβαιότητα δεν χωρά άνετα. Προτίμησε ευρύτερο φακό.", "The uncertainty does not fit comfortably. Prefer a wider lens.")}</p></section><section className="panel compact"><span className="eyebrow">FIELD SETTINGS</span>{Object.entries(recommendation).filter(([key]) => key in SETTING_LABELS).map(([key, value]) => <div className="setting-row" key={key}><span>{pick(SETTING_LABELS[key])}</span><strong>{value}</strong></div>)}</section><section className="safety-card"><ShieldAlert size={20} /><div><strong>{t("Προτεραιότητα η ασφάλεια", "Safety first")}</strong><p>{t("Μην παρατηρείς σε εκτεθειμένο σημείο όταν η καταιγίδα πλησιάζει.", "Do not observe from an exposed spot when the storm approaches.")} {candidate.observedLightning ? t("Η καταιγίδα είναι παρατηρημένη από δορυφόρο· η ακριβής θέση των sprites παραμένει αβέβαιη.", "The storm is observed by satellite; the exact position of sprites stays uncertain.") : t("Ο στόχος εδώ είναι προγνωστικός, όχι επιβεβαιωμένος.", "This target is a forecast, not confirmed.")}</p></div></section></aside>
   </div>;
 }
 
 // A dark outline keeps sky labels readable where they cross grid and frame lines.
 const SKY_LABEL_HALO = { stroke: "#0b1729", strokeWidth: 4, strokeOpacity: 0.85, paintOrder: "stroke" } as const;
 
-function SkyView({ candidate, terrain, fov, lens, orientation, sky, onOrientation }: { candidate: StormCandidate | null; terrain: TerrainProfile | null; fov: { horizontalDeg: number; verticalDeg: number }; lens: LensProfile; orientation: "landscape" | "portrait"; sky: ReturnType<typeof skyState> | null; onOrientation: (value: "landscape" | "portrait") => void }) {
+function SkyView({ candidate, observer, terrain, fov, lens, orientation, sky, onOrientation }: { candidate: StormCandidate | null; observer: SavedLocation; terrain: TerrainProfile | null; fov: { horizontalDeg: number; verticalDeg: number }; lens: LensProfile; orientation: "landscape" | "portrait"; sky: ReturnType<typeof skyState> | null; onOrientation: (value: "landscape" | "portrait") => void }) {
   const { t, language } = useI18n();
   if (!candidate) return <EmptyState title={t("Δεν υπάρχει στόχος", "No target")} description={t("Η πανοραμική όψη απαιτεί επιλεγμένο στόχο.", "The sky view needs a selected target.")} />;
   const low = Math.min(...candidate.pointing.map((point) => point.elevationDeg));
   const high = Math.max(...candidate.pointing.map((point) => point.elevationDeg));
   const horizon = Math.max(0, terrain?.horizonAngleDeg ?? 0);
+  // Jets rise from the cloud top; the band is drawn only above the horizon.
+  const jets = jetEnvelope(observer, candidate.coordinates);
+  const jetTop = jets.at(-1)!.elevationDeg;
+  const jetBottom = Math.max(jets[0].elevationDeg, horizon);
   const maxElevation = Math.ceil(Math.max(30, high + 5, horizon + 5) / 5) * 5;
   const y = (angle: number) => 260 - Math.max(0, Math.min(maxElevation, angle)) / maxElevation * 225;
   const sectorWidth = Math.max(50, fov.horizontalDeg * 1.35);
@@ -1079,7 +1134,7 @@ function SkyView({ candidate, terrain, fov, lens, orientation, sky, onOrientatio
   const rightBearing = (candidate.bearingDeg + sectorWidth / 2) % 360;
   // Elevation labels are drawn inside the SVG so they stay on their grid lines at every width.
   const gridAngles = [0, maxElevation / 2, maxElevation];
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">ANGULAR CAMERA VIEW</span><h1>{t("Ορίζοντας & πραγματικό κάδρο", "Horizon & real frame")}</h1><p>{t("Ο οριζόντιος άξονας είναι αζιμούθιο γύρω από τον στόχο και ο κάθετος πραγματική γωνία ανύψωσης.", "The horizontal axis is azimuth around the target and the vertical axis is true elevation angle.")}</p></div><div className="segmented"><button className={orientation === "landscape" ? "active" : ""} onClick={() => onOrientation("landscape")}>{t("Οριζόντια", "Landscape")}</button><button className={orientation === "portrait" ? "active" : ""} onClick={() => onOrientation("portrait")}>{t("Κάθετα", "Portrait")}</button></div></div><section className="panel sky-panel"><svg viewBox="0 0 700 300" role="img" aria-label={t("Γωνιακό κάδρο, ζώνη TLE και κεντρικός ορίζοντας εδάφους", "Angular frame, TLE band and terrain horizon on the central bearing")}><defs><linearGradient id="skyGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#0a1530" /><stop offset="1" stopColor="#18283b" /></linearGradient><linearGradient id="terrainGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#263b45" /><stop offset="1" stopColor="#101a20" /></linearGradient></defs><rect width="700" height="300" fill="url(#skyGradient)" />{[0, .25, .5, .75, 1].map((ratio) => <line key={ratio} x1="0" x2="700" y1={260 - ratio * 225} y2={260 - ratio * 225} stroke="#7390aa" strokeOpacity=".16" />)}<rect x="70" y={y(Math.min(maxElevation, fov.verticalDeg))} width="560" height={260 - y(Math.min(maxElevation, fov.verticalDeg))} rx="8" fill="none" stroke="#7de4ca" strokeWidth="2" strokeDasharray="7 5" /><line x1="350" x2="350" y1="30" y2="260" stroke="#7de4ca" strokeOpacity=".45" /><rect x={350 - targetWidth / 2} y={y(high)} width={targetWidth} height={Math.max(7, y(low) - y(high))} rx="5" fill="#f04362" fillOpacity=".34" stroke="#ff6d84" /><text x="350" y={Math.max(22, y(high) - 9)} textAnchor="middle" fill="#ffb1be" fontSize="12" {...SKY_LABEL_HALO}>TLE 50–90 km</text>{sky && sky.moonAltitudeDeg > 0 && moonX >= 20 && moonX <= 680 && <g transform={`translate(${moonX},${y(sky.moonAltitudeDeg)})`}><circle r="9" fill="#f4dfad" /><text x="14" y="4" fill="#dce8f3" fontSize="11">{t("Σελήνη", "Moon")}</text></g>}<rect x="0" y={y(horizon)} width="700" height={300 - y(horizon)} fill="url(#terrainGradient)" /><line x1="0" x2="700" y1={y(horizon)} y2={y(horizon)} stroke="#91a49c" strokeWidth="2" />{gridAngles.map((angle) => <text key={angle} x="8" y={angle === 0 ? y(0) + 4 : y(angle) - 4} dominantBaseline={angle === 0 ? "hanging" : undefined} fill="#d3e1eb" fillOpacity=".75" fontSize="11" {...SKY_LABEL_HALO}>{angle}°</text>)}<text x="692" y={y(horizon) + 4} dominantBaseline="hanging" textAnchor="end" fill="#b9c8c3" fontSize="11" {...SKY_LABEL_HALO}>{t("Ορίζοντας DEM", "DEM horizon")}: {terrain?.horizonAngleDeg == null ? t("μη διαθέσιμος", "unavailable") : `${terrain.horizonAngleDeg.toFixed(1)}°`}</text></svg><div className="horizon-caption"><span>{directionLabel(leftBearing, language)} {leftBearing.toFixed(0)}°</span><strong>{t("Στόχος", "Target")} {candidate.bearingDeg.toFixed(1)}°</strong><span>{directionLabel(rightBearing, language)} {rightBearing.toFixed(0)}°</span></div><div className="sky-key"><span><i className="key-tle" />{t("Θεωρητική ζώνη TLE", "Theoretical TLE band")}</span><span><i className="key-fov" />{t("Κάδρο", "Frame")} {lens.focalLengthMm} mm</span><span><i className="key-terrain" />{t("Όριο DEM στην κεντρική διεύθυνση", "DEM limit on the central bearing")}</span></div></section><div className="warning-box"><Mountain size={18} /><p><strong>{t("Περιορισμός:", "Limitation:")}</strong> {t("το DEM ελέγχει τη γραμμή προς το κέντρο του στόχου και δεν παριστάνεται πλέον ως ψεύτικο πανοραμικό ανάγλυφο 360°.", "the DEM checks the line towards the target's centre and is not drawn as a fake 360° panorama.")}</p></div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">ANGULAR CAMERA VIEW</span><h1>{t("Ορίζοντας & πραγματικό κάδρο", "Horizon & real frame")}</h1><p>{t("Ο οριζόντιος άξονας είναι αζιμούθιο γύρω από τον στόχο και ο κάθετος πραγματική γωνία ανύψωσης.", "The horizontal axis is azimuth around the target and the vertical axis is true elevation angle.")}</p></div><div className="segmented"><button className={orientation === "landscape" ? "active" : ""} onClick={() => onOrientation("landscape")}>{t("Οριζόντια", "Landscape")}</button><button className={orientation === "portrait" ? "active" : ""} onClick={() => onOrientation("portrait")}>{t("Κάθετα", "Portrait")}</button></div></div><section className="panel sky-panel"><svg viewBox="0 0 700 300" role="img" aria-label={t("Γωνιακό κάδρο, ζώνη TLE και κεντρικός ορίζοντας εδάφους", "Angular frame, TLE band and terrain horizon on the central bearing")}><defs><linearGradient id="skyGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#0a1530" /><stop offset="1" stopColor="#18283b" /></linearGradient><linearGradient id="terrainGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#263b45" /><stop offset="1" stopColor="#101a20" /></linearGradient></defs><rect width="700" height="300" fill="url(#skyGradient)" />{[0, .25, .5, .75, 1].map((ratio) => <line key={ratio} x1="0" x2="700" y1={260 - ratio * 225} y2={260 - ratio * 225} stroke="#7390aa" strokeOpacity=".16" />)}<rect x="70" y={y(Math.min(maxElevation, fov.verticalDeg))} width="560" height={260 - y(Math.min(maxElevation, fov.verticalDeg))} rx="8" fill="none" stroke="#7de4ca" strokeWidth="2" strokeDasharray="7 5" /><line x1="350" x2="350" y1="30" y2="260" stroke="#7de4ca" strokeOpacity=".45" /><rect x={350 - targetWidth / 2} y={y(high)} width={targetWidth} height={Math.max(7, y(low) - y(high))} rx="5" fill="#f04362" fillOpacity=".34" stroke="#ff6d84" /><text x="350" y={Math.max(22, y(high) - 9)} textAnchor="middle" fill="#ffb1be" fontSize="12" {...SKY_LABEL_HALO}>TLE 50–90 km</text>{jetTop > jetBottom && <><rect x={350 - targetWidth / 2} y={y(jetTop)} width={targetWidth} height={Math.max(4, y(jetBottom) - y(jetTop))} rx="5" fill="#5aa9ff" fillOpacity=".24" stroke="#8cc4ff" strokeDasharray="4 3" /><text x={350 + targetWidth / 2 + 6} y={y(jetTop) + 12} fill="#b9dbff" fontSize="11" {...SKY_LABEL_HALO}>Jets 15–50 km</text></>}{sky && sky.moonAltitudeDeg > 0 && moonX >= 20 && moonX <= 680 && <g transform={`translate(${moonX},${y(sky.moonAltitudeDeg)})`}><circle r="9" fill="#f4dfad" /><text x="14" y="4" fill="#dce8f3" fontSize="11">{t("Σελήνη", "Moon")}</text></g>}<rect x="0" y={y(horizon)} width="700" height={300 - y(horizon)} fill="url(#terrainGradient)" /><line x1="0" x2="700" y1={y(horizon)} y2={y(horizon)} stroke="#91a49c" strokeWidth="2" />{gridAngles.map((angle) => <text key={angle} x="8" y={angle === 0 ? y(0) + 4 : y(angle) - 4} dominantBaseline={angle === 0 ? "hanging" : undefined} fill="#d3e1eb" fillOpacity=".75" fontSize="11" {...SKY_LABEL_HALO}>{angle}°</text>)}<text x="692" y={y(horizon) + 4} dominantBaseline="hanging" textAnchor="end" fill="#b9c8c3" fontSize="11" {...SKY_LABEL_HALO}>{t("Ορίζοντας DEM", "DEM horizon")}: {terrain?.horizonAngleDeg == null ? t("μη διαθέσιμος", "unavailable") : `${terrain.horizonAngleDeg.toFixed(1)}°`}</text></svg><div className="horizon-caption"><span>{directionLabel(leftBearing, language)} {leftBearing.toFixed(0)}°</span><strong>{t("Στόχος", "Target")} {candidate.bearingDeg.toFixed(1)}°</strong><span>{directionLabel(rightBearing, language)} {rightBearing.toFixed(0)}°</span></div><div className="sky-key"><span><i className="key-tle" />{t("Θεωρητική ζώνη TLE", "Theoretical TLE band")}</span><span><i className="key-jets" />{t("Ζώνη jets", "Jet band")}</span><span><i className="key-fov" />{t("Κάδρο", "Frame")} {lens.focalLengthMm} mm</span><span><i className="key-terrain" />{t("Όριο DEM στην κεντρική διεύθυνση", "DEM limit on the central bearing")}</span></div></section><div className="warning-box"><Mountain size={18} /><p><strong>{t("Περιορισμός:", "Limitation:")}</strong> {t("το DEM ελέγχει τη γραμμή προς το κέντρο του στόχου και δεν παριστάνεται πλέον ως ψεύτικο πανοραμικό ανάγλυφο 360°.", "the DEM checks the line towards the target's centre and is not drawn as a fake 360° panorama.")}</p></div></div>;
 }
 
 function AuroraView({ aurora, loading, lens, observer, forecast }: { aurora: AuroraResponse | null; loading: boolean; lens: LensProfile; observer: SavedLocation; forecast: OpportunityResponse["observerForecast"] }) {
@@ -1091,7 +1146,7 @@ function AuroraView({ aurora, loading, lens, observer, forecast }: { aurora: Aur
   const preset = aurora?.kp != null && aurora.kp >= 7
     ? { shutter: "2–5 s", iso: "1600–3200", aperture: `f/${Math.min(2.8, lens.maxAperture).toFixed(1)}`, interval: "1 s" }
     : { shutter: "5–10 s", iso: "3200–6400", aperture: `f/${Math.min(2.8, lens.maxAperture).toFixed(1)}`, interval: "1–2 s" };
-  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">NOAA SPACE WEATHER · AURORA MODE</span><h1>{t("Φωτογράφιση σέλαος", "Aurora photography")}</h1><p>{t(`Πραγματικά δεδομένα NOAA/SWPC, με ειλικρινή αξιολόγηση για τη θέση ${observer.name}.`, `Real NOAA/SWPC data, with an honest assessment for ${observer.name}.`)}</p></div><Sparkles size={31} /></div><div className="aurora-grid"><section className={`panel aurora-status level-${aurora?.level ?? "unknown"}`}><div className="aurora-gauge"><span>Kp</span><strong>{loading ? "…" : aurora?.kp?.toFixed(1) ?? "—"}</strong><small>/ 9</small></div><div><span className="eyebrow">CURRENT ASSESSMENT</span><h2>{loading ? t("Ανάκτηση διαστημικού καιρού…", "Fetching space weather…") : aurora ? pick(aurora.message) : t("Τα δεδομένα NOAA δεν είναι διαθέσιμα.", "NOAA data is unavailable.")}</h2><p>{active ? t("Κατεύθυνση: σκοτεινός βόρειος ορίζοντας, συνήθως 0–15° ανύψωση από την Ελλάδα.", "Direction: the dark northern horizon, usually 0–15° elevation from Greece.") : t("Από την Ελλάδα το σέλας είναι σπάνιο και συνήθως απαιτεί ακραία γεωμαγνητική καταιγίδα.", "From Greece the aurora is rare and usually needs an extreme geomagnetic storm.")}</p></div><div className="aurora-metrics"><Metric icon={Activity} label={t("Τοπικό OVATION", "Local OVATION")} value={aurora?.localProbabilityPercent == null ? "—" : `${aurora.localProbabilityPercent}%`} /><Metric icon={Navigation} label={t("Βόρειος τομέας", "Northern sector")} value={aurora?.northernSectorProbabilityPercent == null ? "—" : `${aurora.northernSectorProbabilityPercent}%`} /><Metric icon={Cloud} label={t("Υψηλή νέφωση εδώ", "High cloud here")} value={currentHour?.cloudCoverHigh == null ? "—" : `${currentHour.cloudCoverHigh}%`} /></div></section><section className="panel aurora-camera"><span className="eyebrow">AURORA STARTING PRESET</span><h2>{lens.name}</h2><div className="settings-grid"><Metric icon={Camera} label={t("Διάφραγμα", "Aperture")} value={preset.aperture} /><Metric icon={Gauge} label="ISO" value={preset.iso} /><Metric icon={Activity} label={t("Έκθεση", "Exposure")} value={preset.shutter} /><Metric icon={RefreshCw} label="Interval" value={preset.interval} /></div><ul className="aurora-checklist"><li>{t("Τρίποδο, RAW και χειροκίνητη εστίαση σε φωτεινό άστρο.", "Tripod, RAW and manual focus on a bright star.")}</li><li>{t("Ισορροπία λευκού 3.500–4.000 K και απενεργοποιημένη μακρά αποθορυβοποίηση.", "White balance 3,500–4,000 K and long-exposure noise reduction off.")}</li><li>{t("Κάνε δοκιμές προς Βορρά και έλεγχε το ιστόγραμμα χωρίς να καίγεται ο ορίζοντας.", "Take test shots to the north and check the histogram without burning out the horizon.")}</li></ul></section><section className="panel ovation-panel"><div className="panel-heading"><div><span className="eyebrow">LIVE OVATION AURORA</span><h2>{t("Βόρειο ημισφαίριο", "Northern hemisphere")}</h2></div><a href="https://www.swpc.noaa.gov/products/aurora-30-minute-forecast" target="_blank" rel="noreferrer">NOAA <ExternalLink size={14} /></a></div><div className="ovation-frame"><img src="https://services.swpc.noaa.gov/images/animations/ovation/north/latest.jpg" width="800" height="800" loading="lazy" decoding="async" alt={t("Τελευταία πρόγνωση OVATION για το βόρειο ημισφαίριο από NOAA SWPC", "Latest NOAA SWPC OVATION forecast for the northern hemisphere")} onLoad={() => setOvationMap("ready")} onError={() => setOvationMap("failed")} /><MapLoader state={ovationMap} label={t("Φόρτωση χάρτη OVATION…", "Loading the OVATION map…")} failedLabel={t("Ο χάρτης της NOAA δεν φόρτωσε.", "The NOAA map did not load.")} /></div><p className="data-note">{t("Το OVATION είναι βραχυπρόθεσμο μοντέλο ωοειδούς σέλαος. Η πιθανότητα πάνω σε βόρεια γεωγραφικά πλάτη δεν σημαίνει ότι είναι ορατό από την Ελλάδα.", "OVATION is a short-term model of the auroral oval. A probability over northern latitudes does not mean it is visible from Greece.")}</p></section></div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><span className="eyebrow">NOAA SPACE WEATHER · AURORA MODE</span><h1>{t("Φωτογράφιση σέλαος", "Aurora photography")}</h1><p>{t(`Πραγματικά δεδομένα NOAA/SWPC, με ειλικρινή αξιολόγηση για τη θέση ${observer.name}.`, `Real NOAA/SWPC data, with an honest assessment for ${observer.name}.`)}</p></div><Sparkles size={31} /></div><div className="aurora-grid"><section className={`panel aurora-status level-${aurora?.level ?? "unknown"}`}><div className="aurora-gauge"><span>Kp</span><strong>{loading ? "…" : aurora?.kp?.toFixed(1) ?? "—"}</strong><small>/ 9</small></div><div><span className="eyebrow">CURRENT ASSESSMENT</span><h2>{loading ? t("Ανάκτηση διαστημικού καιρού…", "Fetching space weather…") : aurora ? pick(aurora.message) : t("Τα δεδομένα NOAA δεν είναι διαθέσιμα.", "NOAA data is unavailable.")}</h2><p>{active ? t("Κατεύθυνση: σκοτεινός βόρειος ορίζοντας, συνήθως 0–15° ανύψωση από την Ελλάδα.", "Direction: the dark northern horizon, usually 0–15° elevation from Greece.") : t("Από την Ελλάδα το σέλας είναι σπάνιο και συνήθως απαιτεί ακραία γεωμαγνητική καταιγίδα.", "From Greece the aurora is rare and usually needs an extreme geomagnetic storm.")}</p></div><div className="aurora-metrics"><Metric icon={Activity} label={t("Τοπικό OVATION", "Local OVATION")} value={aurora?.localProbabilityPercent == null ? "—" : `${aurora.localProbabilityPercent}%`} /><Metric icon={Navigation} label={t("Βόρεια, εντός ορατότητας", "North, within view")} value={aurora?.northernSectorProbabilityPercent == null ? "—" : `${aurora.northernSectorProbabilityPercent}%`} hint={t("έως 1.600 km", "up to 1,600 km")} /><Metric icon={Cloud} label={t("Υψηλή νέφωση εδώ", "High cloud here")} value={currentHour?.cloudCoverHigh == null ? "—" : `${currentHour.cloudCoverHigh}%`} /></div></section><section className="panel aurora-camera"><span className="eyebrow">AURORA STARTING PRESET</span><h2>{lens.name}</h2><div className="settings-grid"><Metric icon={Camera} label={t("Διάφραγμα", "Aperture")} value={preset.aperture} /><Metric icon={Gauge} label="ISO" value={preset.iso} /><Metric icon={Activity} label={t("Έκθεση", "Exposure")} value={preset.shutter} /><Metric icon={RefreshCw} label="Interval" value={preset.interval} /></div><ul className="aurora-checklist"><li>{t("Τρίποδο, RAW και χειροκίνητη εστίαση σε φωτεινό άστρο.", "Tripod, RAW and manual focus on a bright star.")}</li><li>{t("Ισορροπία λευκού 3.500–4.000 K και απενεργοποιημένη μακρά αποθορυβοποίηση.", "White balance 3,500–4,000 K and long-exposure noise reduction off.")}</li><li>{t("Κάνε δοκιμές προς Βορρά και έλεγχε το ιστόγραμμα χωρίς να καίγεται ο ορίζοντας.", "Take test shots to the north and check the histogram without burning out the horizon.")}</li></ul></section><section className="panel ovation-panel"><div className="panel-heading"><div><span className="eyebrow">LIVE OVATION AURORA</span><h2>{t("Βόρειο ημισφαίριο", "Northern hemisphere")}</h2></div><a href="https://www.swpc.noaa.gov/products/aurora-30-minute-forecast" target="_blank" rel="noreferrer">NOAA <ExternalLink size={14} /></a></div><div className="ovation-frame"><img src="https://services.swpc.noaa.gov/images/animations/ovation/north/latest.jpg" width="800" height="800" loading="lazy" decoding="async" alt={t("Τελευταία πρόγνωση OVATION για το βόρειο ημισφαίριο από NOAA SWPC", "Latest NOAA SWPC OVATION forecast for the northern hemisphere")} onLoad={() => setOvationMap("ready")} onError={() => setOvationMap("failed")} /><MapLoader state={ovationMap} label={t("Φόρτωση χάρτη OVATION…", "Loading the OVATION map…")} failedLabel={t("Ο χάρτης της NOAA δεν φόρτωσε.", "The NOAA map did not load.")} /></div><p className="data-note">{t("Το OVATION είναι βραχυπρόθεσμο μοντέλο ωοειδούς σέλαος. Η πιθανότητα πάνω σε βόρεια γεωγραφικά πλάτη δεν σημαίνει ότι είναι ορατό από την Ελλάδα.", "OVATION is a short-term model of the auroral oval. A probability over northern latitudes does not mean it is visible from Greece.")}</p></section></div></div>;
 }
 
 function LocationsView({ observer, locations, candidate, onObserver, onLocations }: { observer: SavedLocation; locations: SavedLocation[]; candidate: StormCandidate | null; onObserver: (value: SavedLocation) => void; onLocations: (value: SavedLocation[]) => void }) {
@@ -1219,11 +1274,11 @@ function SettingsView({ observer, range, data, language, eumetsat, radarStatus, 
     [tx("ΔΩΡΕΑΝ · ΑΜΕΡΙΚΗ", "FREE · AMERICAS"), "NOAA GOES-GLM", tx("Δημόσια total-lightning δεδομένα για Αμερική και γειτονικούς ωκεανούς· δεν καλύπτει την Ελλάδα.", "Public total-lightning data for the Americas and nearby oceans; it does not cover Greece.")],
   ];
   const envelopes: Array<[string, string, Localized]> = [
-    ["Red Sprites", "50–90 km", tx("κύριο μοντέλο", "main model")],
-    ["Sprite Halos", "70–90 km", tx("ενημερωτικό", "informative")],
-    ["ELVES", "70–100 km", tx("πειραματικό", "experimental")],
-    ["Blue Jets", "15–50 km", tx("πειραματικό", "experimental")],
-    ["Gigantic Jets", "15–90 km", tx("πειραματικό", "experimental")],
+    ["Red Sprites", "50–90 km", tx("κύριο μοντέλο στόχευσης και δείκτη", "main pointing and index model")],
+    ["Sprite Halos", "70–85 km", tx("μέσα στη ζώνη των sprites", "inside the sprite band")],
+    ["ELVES", "~85–95 km", tx("μέσα στη ζώνη sprites· ο δείκτης μετρά κεραυνούς ±100 kA", "inside the sprite band; the index counts ±100 kA strokes")],
+    ["Blue Jets", "15–50 km", tx("ζώνη jets στη Στόχευση και στον Ορίζοντα", "jet band in Pointing and Horizon")],
+    ["Gigantic Jets", "15–90 km", tx("ζώνες jets και sprites μαζί", "jet and sprite bands together")],
   ];
   return (
     <div className="view-stack">

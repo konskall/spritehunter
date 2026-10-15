@@ -151,6 +151,12 @@ describe("astronomy, timezone, and freshness", () => {
     expect(state.moonIllumination).toBeGreaterThanOrEqual(0);
     expect(state.moonIllumination).toBeLessThanOrEqual(1);
   });
+  it("measures twilight on the Sun's true altitude, as its definitions do", () => {
+    // Astronomy Engine: at Sparta on 21 Dec 2026 the Sun's centre is truly 18° and 6° below the
+    // horizon at 16:50:08 and 15:45:49 UTC. Refraction does not apply below the horizon.
+    expect(skyState(new Date("2026-12-21T16:50:08Z"), sparta.latitude, sparta.longitude).sunAltitudeDeg).toBeCloseTo(-18, 1);
+    expect(skyState(new Date("2026-12-21T15:45:49Z"), sparta.latitude, sparta.longitude).sunAltitudeDeg).toBeCloseTo(-6, 1);
+  });
   it("handles Athens standard and daylight-saving offsets", () => {
     expect(athensUtcOffsetMinutes(new Date("2026-01-15T12:00:00Z"))).toBe(120);
     expect(athensUtcOffsetMinutes(new Date("2026-07-15T12:00:00Z"))).toBe(180);

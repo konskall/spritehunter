@@ -117,11 +117,18 @@ describe("PNG decoding", () => {
 });
 
 describe("MTG-LI accumulated flash area", () => {
-  it("maps legend colours to flash counts per 5 minutes", () => {
-    expect(flashCountFromColor(254, 249, 189)).toBeGreaterThanOrEqual(1);
-    expect(flashCountFromColor(254, 249, 189)).toBeLessThan(2);
-    expect(flashCountFromColor(253, 131, 57)).toBeCloseTo(10, 0);
-    expect(flashCountFromColor(177, 1, 38)).toBeGreaterThanOrEqual(15);
+  it("maps AFA colours to whole flash counts per 5 minutes on the linear scale", () => {
+    // Dominant colours of 43,000 lit pixels in 24 live frames (15 Oct 2026): the counts sit
+    // ~22 legend pixels apart, one per flash, from 1 up to the saturated 20+.
+    const measured: Array<[number, number, number, number]> = [
+      [254, 249, 189, 1], [254, 243, 173, 2], [255, 236, 158, 3], [254, 229, 143, 4], [254, 222, 128, 5],
+      [254, 213, 113, 6], [254, 200, 98, 7], [254, 186, 83, 8], [254, 172, 72, 9], [254, 160, 66, 10],
+      [253, 145, 61, 11], [253, 123, 52, 12], [253, 104, 46, 13], [252, 86, 42, 14],
+      [234, 43, 32, 16], [225, 28, 30, 17], [212, 16, 33, 18], [182, 3, 38, 20],
+    ];
+    for (const [r, g, b, count] of measured) expect(flashCountFromColor(r, g, b), `${r},${g},${b}`).toBe(count);
+    // A pixel blended at a storm edge reads as the nearest whole count.
+    expect(flashCountFromColor(254, 247, 185)).toBe(1);
   });
 
   it("reads the frame time GeoServer actually used", () => {
@@ -177,6 +184,20 @@ describe("MTG-LI accumulated flash area", () => {
 });
 
 describe("storm-sized lightning clusters", () => {
+  it("keeps every storm, so a small one is not missed by the nearby-lightning check", () => {
+    const bounds = { west: 20, south: 35, east: 24, north: 39 };
+    const image = { width: 100, height: 100, data: new Uint8Array(100 * 100 * 4) };
+    // 45 two-pixel storms, each two empty 0.2° cells away from the next.
+    for (let index = 0; index < 45; index += 1) {
+      const x = (index % 10) * 10;
+      const y = Math.floor(index / 10) * 10;
+      image.data.set([254, 243, 173, 255], (y * 100 + x) * 4);
+      image.data.set([254, 243, 173, 255], (y * 100 + x + 1) * 4);
+    }
+    const clusters = clusterLightningFrames([{ time: "2026-10-12T21:10:00.000Z", image }], bounds, Date.parse("2026-10-12T21:25:00Z"));
+    expect(clusters).toHaveLength(45);
+  });
+
   it("splits a long squall line instead of chaining it into one huge storm", () => {
     const bounds = { west: 20, south: 35, east: 24, north: 39 };
     const image = { width: 100, height: 100, data: new Uint8Array(100 * 100 * 4) };
@@ -216,8 +237,8 @@ describe("observed lightning in the opportunity score", () => {
   it("treats missing model context as neutral for an observed storm", () => {
     const noModel = { ...base, capeJkg: null, precipitationMm: null, thunderCode: false };
     const observed = scoreOpportunity({ ...noModel, lightning: "observed", observedLightning: { ...detail, areaKm2: 17_000 } });
-    // Bonus 6 + 10 (area) + 2 (rate) + 1 (persistence) on top of a neutral model term of 8.
-    expect(observed.activity).toBe(27);
+    // Lightning 9 + 3.5·log10(17 000/50) ≈ 8.9 (area) + 2 (rate) + 1 (persistence) on top of a neutral model share of 3.
+    expect(observed.activity).toBe(24);
     expect(observed.limitations.some((text) => text.el.includes("μοντέλου"))).toBe(true);
   });
 

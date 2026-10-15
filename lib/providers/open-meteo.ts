@@ -13,9 +13,10 @@ import type {
   StormCandidate,
   WeatherHour,
 } from "@/lib/domain";
-import { altitudeEnvelope, destinationPoint, inverseGeodesic } from "@/lib/geodesy";
+import { altitudeEnvelope, destinationPoint, inverseGeodesic, lookAngles } from "@/lib/geodesy";
 import { skyState } from "@/lib/astronomy";
-import { scoreOpportunity } from "@/lib/scoring";
+import { modelActivity, scoreOpportunity } from "@/lib/scoring";
+import { pathCloudPercent, pathSampleGrid, type PathSample } from "@/lib/line-of-sight";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
 import { InFlight, TtlCache } from "@/lib/bounded-cache";
 import { tx, type Localized } from "@/lib/i18n";
@@ -66,15 +67,32 @@ const airSchema = z.object({
 });
 
 export type WeatherPayload = z.infer<typeof weatherSchema>;
-const CACHE_TTL_MS = 15 * 60_000;
+// Hourly model data changes at most with each model run. An hour of caching keeps the dense
+// scan (≈150 locations) at about the Open-Meteo calls of the old 24-cell scan cached for 15
+// minutes; lightning has its own 4-minute cache and stays live.
+const CACHE_TTL_MS = 60 * 60_000;
 // A scan with failed cells is kept only briefly, so the next refresh asks again.
 const PARTIAL_CACHE_TTL_MS = 2 * 60_000;
 const SERVER_ONLY_MESSAGE = tx("Διαθέσιμο μόνο μέσω του server της εφαρμογής (ο πάροχος δεν επιτρέπει κλήσεις από browser).", "Available only through the app's server (the provider does not allow browser requests).");
 // Candidates are only searched over the next 48 h; fetching more only slowed the provider.
 const FORECAST_HOURS = 48;
 const CANDIDATE_WINDOW_HOURS = 48;
-// Two screening requests: fewer parallel calls avoid Open-Meteo 429 bursts.
-const SCREENING_BATCH_SIZE = 12;
+// Few, large requests: many parallel calls caused Open-Meteo 429 bursts.
+const SCREENING_BATCH_SIZE = 48;
+// The scan: every 15° and one ring per 100 km of range. Checked against MTG-LI for Oct 2025–Feb
+// 2026 (Sparta, 200–600 km), 24 cells 45° apart had a target near 27 % of the large storms; this
+// grid with the storm-hour rule below, 76 %.
+const SCAN_BEARING_STEP_DEG = 15;
+const SCAN_RING_SPACING_KM = 100;
+// Where a forecast storm will really be: on this grid, cells with lightning nearby were 53 km
+// from the storm centre at the median and 78 km at the 75th percentile.
+const FORECAST_UNCERTAINTY_KM = 80;
+// Neighbouring cells within this distance and these hours show one storm; the best is kept.
+const DUPLICATE_DISTANCE_KM = 150;
+const DUPLICATE_HOURS = 3;
+// An observed storm moves for the ~15 minutes MTG-LI lags, and the satellite's slanted view may
+// place its lightning ~10–15 km off: both widen the area around the lit pixels.
+const OBSERVED_MARGIN_KM = 25;
 // Forecast data changes hourly; lightning is merged on every request from its own 4-minute cache.
 interface ForecastBase {
   fetchedAt: string;
@@ -83,6 +101,7 @@ interface ForecastBase {
   aviation: AviationObservation;
   weatherAlerts: OpportunityResponse["weatherAlerts"];
   payloads: WeatherPayload[];
+  pathSamples: PathSample[];
   screeningFailures: number;
   screeningError: string | null;
   gridSize: number;
@@ -107,6 +126,8 @@ const RESERVED_OBSERVED = 3;
 const MODEL_CONTEXT_KM = 150;
 // The lightning box extends past the scan radius so storms straddling its edge are whole.
 const LIGHTNING_MARGIN_KM = 60;
+// MTG-LI storms included in the response (the largest); scoring uses all of them.
+const LISTED_STORMS = 40;
 
 const WEATHER_VARIABLES = [
   "temperature_2m",
@@ -126,6 +147,21 @@ const WEATHER_VARIABLES = [
   "total_column_integrated_water_vapour",
   "weather_code",
 ];
+// Scan cells need only the storm signal and what a target shows. Up to 10 variables count as
+// one Open-Meteo call per location (with the 15-minute lightning potential, 10 here).
+const SCAN_VARIABLES = [
+  "precipitation",
+  "cloud_cover_high",
+  "wind_speed_10m",
+  "wind_direction_10m",
+  "cape",
+  "convective_inhibition",
+  "lifted_index",
+  "total_column_integrated_water_vapour",
+  "weather_code",
+];
+// The line-of-sight points need the three cloud layers only.
+const PATH_VARIABLES = ["cloud_cover_low", "cloud_cover_mid", "cloud_cover_high"];
 
 function valueAt(values: Array<number | null> | undefined, index: number) {
   return values?.[index] ?? null;
@@ -204,24 +240,28 @@ function airHours(payload: z.infer<typeof airSchema>): AirQualityHour[] {
   }));
 }
 
-function makeScreeningGrid(observer: Coordinates, minimumKm: number, maximumKm: number) {
-  const span = maximumKm - minimumKm;
-  const distances = [minimumKm + span * 0.2, minimumKm + span * 0.55, minimumKm + span * 0.9];
+/** Scan cells: every 15°, on rings centred in each ~100 km band of the scan range. */
+export function screeningGrid(observer: Coordinates, minimumKm: number, maximumKm: number) {
+  const rings = Math.max(1, Math.round((maximumKm - minimumKm) / SCAN_RING_SPACING_KM));
+  const spacing = (maximumKm - minimumKm) / rings;
+  const distances = Array.from({ length: rings }, (_, index) => minimumKm + spacing * (index + 0.5));
   return distances.flatMap((distanceKm) =>
-    Array.from({ length: 8 }, (_, index) => destinationPoint(observer, distanceKm, index * 45)),
+    Array.from({ length: 360 / SCAN_BEARING_STEP_DEG }, (_, index) => destinationPoint(observer, distanceKm, index * SCAN_BEARING_STEP_DEG)),
   );
 }
 
-function weatherUrl(points: Coordinates[]) {
+function weatherUrl(points: Coordinates[], variables = WEATHER_VARIABLES, withLightningPotential = true) {
   const params = new URLSearchParams({
     latitude: points.map((point) => point.latitude.toFixed(5)).join(","),
     longitude: points.map((point) => point.longitude.toFixed(5)).join(","),
-    hourly: WEATHER_VARIABLES.join(","),
-    minutely_15: "lightning_potential",
-    forecast_minutely_15: String(FORECAST_HOURS * 4),
+    hourly: variables.join(","),
     forecast_hours: String(FORECAST_HOURS),
     timezone: "UTC",
   });
+  if (withLightningPotential) {
+    params.set("minutely_15", "lightning_potential");
+    params.set("forecast_minutely_15", String(FORECAST_HOURS * 4));
+  }
   return `https://api.open-meteo.com/v1/forecast?${params}`;
 }
 
@@ -240,8 +280,8 @@ function parseWeatherPayloads(raw: unknown): WeatherPayload[] {
   throw new Error("Open-Meteo returned an unsupported response shape.");
 }
 
-async function fetchWeatherBatch(points: Coordinates[]) {
-  const raw = await fetchJsonWithRetry<unknown>(weatherUrl(points), {
+async function fetchWeatherBatch(points: Coordinates[], variables = WEATHER_VARIABLES, withLightningPotential = true) {
+  const raw = await fetchJsonWithRetry<unknown>(weatherUrl(points, variables, withLightningPotential), {
     retries: 1,
     timeoutMs: 12_000,
     deadlineMs: 20_000,
@@ -260,14 +300,16 @@ function chunks<T>(values: T[], size: number) {
   );
 }
 
-function stormSignal(hour: WeatherHour) {
-  const cape = hour.capeJkg ?? 0;
-  const precipitation = hour.precipitationMm ?? 0;
-  const cinPenalty = Math.min(5, Math.max(0, (hour.convectiveInhibitionJkg ?? 0) - 75) / 35);
-  const liftedBoost = Math.max(0, -(hour.liftedIndex ?? 0)) * 1.4;
-  const moistureBoost = Math.max(0, (hour.precipitableWaterKgM2 ?? 20) - 24) / 4;
-  const thunderCode = hour.weatherCode != null && [95, 96, 99].includes(hour.weatherCode);
-  return cape / 80 + precipitation * 2 + liftedBoost + moistureBoost + (thunderCode ? 8 : 0) - cinPenalty;
+/** The model's storm signal for an hour, the same one the score uses. */
+const stormSignal = (hour: WeatherHour) => modelActivity({ ...hour, thunderCode: isThunderCode(hour.weatherCode) });
+
+/**
+ * A model hour worth a target: a thunderstorm code, or rain with some instability. Instability
+ * alone was a poor sign (2–12 % of such cells had lightning nearby); with this rule the scan found
+ * 88 % of the large storms, against 76 % before, and more of its cells were right (48 % vs 38 %).
+ */
+export function isStormHour(hour: Pick<WeatherHour, "capeJkg" | "precipitationMm" | "weatherCode">) {
+  return isThunderCode(hour.weatherCode) || ((hour.capeJkg ?? 0) >= 100 && (hour.precipitationMm ?? 0) >= 0.2);
 }
 
 function emptyHour(time: string): WeatherHour {
@@ -286,6 +328,11 @@ function closestHour(hours: WeatherHour[], time: string) {
   return index >= 0 ? hours[index] : null;
 }
 
+// The line of sight is judged towards the lower body of a sprite, ~60 km up.
+const SIGHTLINE_ALTITUDE_M = 60_000;
+const sightlineElevation = (observer: Coordinates, target: Coordinates) =>
+  lookAngles(observer, { ...target, elevationM: SIGHTLINE_ALTITUDE_M }).elevationDeg;
+
 function scoreInputForHour(
   observer: Coordinates,
   hour: WeatherHour,
@@ -294,16 +341,20 @@ function scoreInputForHour(
   observerHours: WeatherHour[],
   aviation: AviationObservation,
   geometry: { distanceM: number; initialBearingDeg: number },
+  sightline: { samples: PathSample[]; elevationDeg: number },
 ): CandidateScoreInput {
   const observerHour = closestHour(observerHours, hour.time) ?? observerHours[0];
   // A METAR is a point observation: only fresh, nearby reports close in time to the
-  // valid hour may replace the forecast, and only for what it measures (low/mid cloud,
-  // visibility). It cannot see high cirrus, so high cloud always comes from the model.
+  // valid hour may replace the forecast, and only for what it measures. European METARs
+  // report cloud below ~1,500 m (CAVOK and NSC say nothing above), so mid and high cloud
+  // always come from the model.
   const metarRelevant = aviation.status === "available"
     && aviation.observedAt != null
     && (aviation.distanceKm ?? Number.POSITIVE_INFINITY) <= 180
     && Math.abs(new Date(hour.time).getTime() - new Date(aviation.observedAt).getTime()) <= 3 * 60 * 60_000;
-  const metarCloud = metarRelevant ? aviation.cloudCoverPercent : null;
+  const metarCloud = metarRelevant && aviation.cloudCoverPercent != null
+    ? Math.max(aviation.cloudCoverPercent, observerHour?.cloudCoverMid ?? 0, observerHour?.cloudCoverHigh ?? 0)
+    : null;
   // "10 km or more" (9999, CAVOK) is only a minimum and must not lower a clearer forecast.
   const metarVisibility = !metarRelevant || aviation.visibilityM == null
     ? null
@@ -325,6 +376,7 @@ function scoreInputForHour(
     atmosphereSource: metarCloud != null || metarVisibility != null ? "observation" : "forecast",
     observerCloudSources: agreement.sources,
     observerCloudSpread: agreement.spread,
+    pathCloudPercent: pathCloudPercent(sightline.samples, geometry.initialBearingDeg, sightline.elevationDeg, hour.time),
     distanceKm: geometry.distanceM / 1000,
     sunAltitudeDeg: sky.sunAltitudeDeg,
     moonInterference: sky.moonInterference,
@@ -359,6 +411,7 @@ export function buildCandidate(
   fetchedAt: string,
   nowMs = Date.now(),
   lightningCheck: LightningCheck | null = null,
+  pathSamples: PathSample[] = [],
 ): StormCandidate | null {
   const hours = cachedWeatherHours(target);
   const times = timesOf(hours, (hour) => hour.time);
@@ -369,6 +422,7 @@ export function buildCandidate(
     elevationM: target.elevation ?? 0,
   };
   const geometry = inverseGeodesic(observer, coordinates);
+  const sightline = { samples: pathSamples, elevationDeg: sightlineElevation(observer, coordinates) };
 
   // Score every qualifying hour and keep the best opportunity, so a stronger
   // daytime convective peak (capped at 29 by daylight) cannot hide a usable night.
@@ -376,14 +430,11 @@ export function buildCandidate(
     .filter((_, index) => times[index] >= windowStart)
     .slice(0, CANDIDATE_WINDOW_HOURS)
     .flatMap((hour) => {
-      const cape = hour.capeJkg ?? 0;
-      const precipitation = hour.precipitationMm ?? 0;
-      const thunderCode = isThunderCode(hour.weatherCode);
-      if (!thunderCode && !(cape >= 250 && precipitation >= 0.2) && cape < 600) return [];
+      if (!isStormHour(hour)) return [];
       // Hours near the newest MTG-LI frame are confirmed or contradicted per hour, so a
       // contradicted "now" cannot hide a later hour of the same cell.
       const scoreInput: CandidateScoreInput = {
-        ...scoreInputForHour(observer, hour, thunderCode, lightningPotentialAt(target, hour.time), observerHours, aviation, geometry),
+        ...scoreInputForHour(observer, hour, isThunderCode(hour.weatherCode), lightningPotentialAt(target, hour.time), observerHours, aviation, geometry, sightline),
         ...lightningForHour(lightningCheck, coordinates, hour.time),
       };
       return [{ hour, scoreInput, score: scoreOpportunity({ ...scoreInput, terrain: "unknown" }), signal: stormSignal(hour) }];
@@ -394,7 +445,6 @@ export function buildCandidate(
   const { hour, scoreInput, score } = best;
   const pointing = altitudeEnvelope(observer, coordinates);
   const lightningPotentialJkg = scoreInput.lightningPotentialJkg ?? null;
-  const uncertaintyKm = Math.round(35 + Math.min(45, (hour.windSpeedKmh ?? 0) * 1.5));
 
   return {
     id: `forecast-${target.latitude.toFixed(2)}-${target.longitude.toFixed(2)}-${hour.time}`,
@@ -402,7 +452,7 @@ export function buildCandidate(
     forecastValidAt: hour.time,
     distanceKm: Math.round((geometry.distanceM / 1000) * 10) / 10,
     bearingDeg: Math.round(geometry.initialBearingDeg * 10) / 10,
-    uncertaintyKm,
+    uncertaintyKm: FORECAST_UNCERTAINTY_KM,
     capeJkg: hour.capeJkg,
     convectiveInhibitionJkg: hour.convectiveInhibitionJkg,
     liftedIndex: hour.liftedIndex,
@@ -454,6 +504,8 @@ export interface TargetContext {
   maximumKm: number;
   fetchedAt: string;
   nowMs?: number;
+  /** Cloud layers along the lines of sight (see lib/line-of-sight). */
+  pathSamples?: PathSample[];
 }
 
 function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster, payloads: WeatherPayload[], context: TargetContext, nowMs: number): StormCandidate | null {
@@ -470,7 +522,8 @@ function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster
   const hour: WeatherHour = { ...(modelHour ?? emptyHour(cluster.observedAt)), time: cluster.observedAt };
   const detail = observedDetail(cluster, nowMs);
   const scoreInput: CandidateScoreInput = {
-    ...scoreInputForHour(observer, hour, isThunderCode(hour.weatherCode), model ? lightningPotentialAt(model, cluster.observedAt) : null, context.observerHours, context.aviation, geometry),
+    ...scoreInputForHour(observer, hour, isThunderCode(hour.weatherCode), model ? lightningPotentialAt(model, cluster.observedAt) : null, context.observerHours, context.aviation, geometry,
+      { samples: context.pathSamples ?? [], elevationDeg: sightlineElevation(observer, coordinates) }),
     lightning: "observed",
     observedLightning: detail,
   };
@@ -481,7 +534,7 @@ function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster
     distanceKm: Math.round(distanceKm * 10) / 10,
     bearingDeg: Math.round(geometry.initialBearingDeg * 10) / 10,
     // Sprites appear over the storm's stratiform region, often tens of km from the lightning core.
-    uncertaintyKm: Math.round(Math.max(20, Math.min(90, cluster.radiusKm + 15))),
+    uncertaintyKm: Math.round(Math.max(OBSERVED_MARGIN_KM, Math.min(90, cluster.radiusKm + OBSERVED_MARGIN_KM))),
     capeJkg: hour.capeJkg,
     convectiveInhibitionJkg: hour.convectiveInhibitionJkg,
     liftedIndex: hour.liftedIndex,
@@ -515,6 +568,22 @@ function buildObservedCandidate(observer: Coordinates, cluster: LightningCluster
 const byScore = (a: StormCandidate, b: StormCandidate) => b.score.total - a.score.total;
 
 /**
+ * Neighbouring scan cells often show the same forecast storm. Keeps the best-scored cell and
+ * drops forecast cells near it (≤ 150 km) whose valid time is within 3 hours of it.
+ */
+export function dropNearbyForecasts(candidates: StormCandidate[]) {
+  const kept: StormCandidate[] = [];
+  for (const candidate of [...candidates].sort(byScore)) {
+    const time = Date.parse(utcIso(candidate.forecastValidAt));
+    const duplicate = kept.some((other) =>
+      Math.abs(Date.parse(utcIso(other.forecastValidAt)) - time) <= DUPLICATE_HOURS * 3_600_000
+      && distanceKmBetween(other.coordinates, candidate.coordinates) <= DUPLICATE_DISTANCE_KM);
+    if (!duplicate) kept.push(candidate);
+  }
+  return kept;
+}
+
+/**
  * All targets for one scan: forecast cells (hours near the newest MTG-LI frame confirmed
  * or damped by it) plus every observed storm inside the scan range. A forecast cell whose
  * chosen hour is confirmed by a storm that is itself a target is dropped as a duplicate.
@@ -528,10 +597,10 @@ export function buildTargets(
   const nowMs = context.nowMs ?? Date.now();
   const usable = observation?.status === "available" && observation.latestFrameAt ? observation : null;
   const check = usable ? { frameMs: Date.parse(usable.latestFrameAt!), clusters: usable.clusters, nowMs } : null;
-  const forecast = payloads
-    .map((payload) => buildCandidate(observer, payload, context.observerHours, context.aviation, context.fetchedAt, nowMs, check))
-    .filter((candidate): candidate is StormCandidate => candidate !== null);
-  if (!usable) return forecast.sort(byScore);
+  const forecast = dropNearbyForecasts(payloads
+    .map((payload) => buildCandidate(observer, payload, context.observerHours, context.aviation, context.fetchedAt, nowMs, check, context.pathSamples))
+    .filter((candidate): candidate is StormCandidate => candidate !== null));
+  if (!usable) return forecast;
   const observed = usable.clusters
     .map((cluster) => buildObservedCandidate(observer, cluster, payloads, context, nowMs))
     .filter((candidate): candidate is StormCandidate => candidate !== null);
@@ -597,7 +666,8 @@ async function loadForecastBase(observer: Coordinates, minimumKm: number, maximu
 }
 
 async function fetchForecastBase(cacheKey: string, observer: Coordinates, minimumKm: number, maximumKm: number, serverOnlySources: boolean): Promise<ForecastBase> {
-  const grid = makeScreeningGrid(observer, minimumKm, maximumKm);
+  const grid = screeningGrid(observer, minimumKm, maximumKm);
+  const pathGrid = pathSampleGrid(observer);
   const airParams = new URLSearchParams({
     latitude: observer.latitude.toString(),
     longitude: observer.longitude.toString(),
@@ -609,7 +679,7 @@ async function fetchForecastBase(cacheKey: string, observer: Coordinates, minimu
   const screeningBatches = chunks(grid, SCREENING_BATCH_SIZE);
   const useWeatherApi = serverOnlySources && weatherApiConfigured();
   const useOpenWeather = serverOnlySources && openWeatherConfigured();
-  const [observerResult, airResult, aviationResult, alertResult, weatherApiResult, openWeatherResult, ...screeningResults] = await Promise.allSettled([
+  const [observerResult, airResult, aviationResult, alertResult, weatherApiResult, openWeatherResult, pathResult, ...screeningResults] = await Promise.allSettled([
     fetchWeatherBatch([observer]),
     fetchJsonWithRetry<unknown>(`https://air-quality-api.open-meteo.com/v1/air-quality?${airParams}`, { retries: 1, timeoutMs: 10_000, deadlineMs: 15_000 }),
     // AviationWeather and MeteoAlarm send no CORS headers, so the browser fallback skips them.
@@ -618,7 +688,8 @@ async function fetchForecastBase(cacheKey: string, observer: Coordinates, minimu
     // Keyed sources stay on the server; the browser fallback never has the keys.
     useWeatherApi ? fetchWeatherApiHours(observer) : Promise.resolve(null),
     useOpenWeather ? fetchOpenWeatherHours(observer) : Promise.resolve(null),
-    ...screeningBatches.map((batch) => fetchWeatherBatch(batch)),
+    fetchWeatherBatch(pathGrid, PATH_VARIABLES, false),
+    ...screeningBatches.map((batch) => fetchWeatherBatch(batch, SCAN_VARIABLES)),
   ]);
 
   if (observerResult.status === "rejected") {
@@ -653,6 +724,10 @@ async function fetchForecastBase(cacheKey: string, observer: Coordinates, minimu
       ? alertResult.value
       : unavailableMeteoAlarm(serverOnlySources ? tx("Η επίσημη ροή προειδοποιήσεων δεν ήταν διαθέσιμη.", "The official warnings feed was unavailable.") : SERVER_ONLY_MESSAGE, fetchedAt),
     payloads: screeningResults.flatMap((result) => result.status === "fulfilled" ? result.value : []),
+    // Without them the score falls back to the observer's own sky only.
+    pathSamples: pathResult.status === "fulfilled"
+      ? pathResult.value.map((payload, index) => ({ bearingDeg: pathGrid[index].bearingDeg, distanceKm: pathGrid[index].distanceKm, hours: weatherHours(payload) }))
+      : [],
     screeningFailures: screeningResults.filter((result) => result.status === "rejected").length,
     screeningError: screeningResults.flatMap((result) => result.status === "rejected" ? [errorDetail(result.reason)] : [])[0] ?? null,
     gridSize: grid.length,
@@ -663,7 +738,7 @@ async function fetchForecastBase(cacheKey: string, observer: Coordinates, minimu
 
 export async function fetchOpportunities(
   observer: Coordinates,
-  minimumKm = 200,
+  minimumKm = 100,
   maximumKm = 600,
   { serverOnlySources = true }: { serverOnlySources?: boolean } = {},
 ): Promise<OpportunityResponse> {
@@ -675,8 +750,8 @@ export async function fetchOpportunities(
       : Promise.resolve(serverOnlyLightning(new Date().toISOString())),
   ]);
   const nowMs = Date.now();
-  const { fetchedAt, observerForecast, airQuality, aviation, weatherAlerts, payloads, screeningFailures, screeningError, gridSize, skySources } = base;
-  const allTargets = buildTargets(observer, payloads, rawLightning, { observerHours: observerForecast, aviation, minimumKm, maximumKm, fetchedAt, nowMs });
+  const { fetchedAt, observerForecast, airQuality, aviation, weatherAlerts, payloads, pathSamples, screeningFailures, screeningError, gridSize, skySources } = base;
+  const allTargets = buildTargets(observer, payloads, rawLightning, { observerHours: observerForecast, aviation, minimumKm, maximumKm, fetchedAt, nowMs, pathSamples });
   const xweatherReady = serverOnlySources && xweatherConfigured();
   const darkEnough = skyState(new Date(nowMs), observer.latitude, observer.longitude, 0).sunAltitudeDeg <= CG_MAX_SUN_ALTITUDE_DEG;
   const quotaLeft = xweatherQuotaAllows(nowMs);
@@ -685,9 +760,10 @@ export async function fetchOpportunities(
   const candidates = cgCheck?.candidates ?? selectTopCandidates(allTargets);
   const observedCount = candidates.filter((candidate) => candidate.source === "observed").length;
   // Ages are recomputed per response; the observation itself is cached for a few minutes.
+  // Scoring used every storm; the response lists the largest only.
   const lightning: LightningObservation = {
     ...rawLightning,
-    clusters: rawLightning.clusters.map((cluster) => ({ ...cluster, ageMinutes: Math.max(0, Math.round((nowMs - Date.parse(cluster.observedAt)) / 60_000)) })),
+    clusters: rawLightning.clusters.slice(0, LISTED_STORMS).map((cluster) => ({ ...cluster, ageMinutes: Math.max(0, Math.round((nowMs - Date.parse(cluster.observedAt)) / 60_000)) })),
     inRangeCount: allTargets.filter((candidate) => candidate.source === "observed").length,
   };
 

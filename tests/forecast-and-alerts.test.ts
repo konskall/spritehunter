@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AviationObservation, WeatherHour } from "@/lib/domain";
-import { buildCandidate } from "@/lib/providers/open-meteo";
+import { buildCandidate, dropNearbyForecasts, screeningGrid } from "@/lib/providers/open-meteo";
+import { pathCloudPercent, pathSampleGrid } from "@/lib/line-of-sight";
+import type { StormCandidate } from "@/lib/domain";
+import { destinationPoint, inverseGeodesic } from "@/lib/geodesy";
 import { rescoreWithTerrain } from "@/lib/scoring";
 import { evaluateAlert, isQuietTime, meetsConfidence } from "@/lib/notifications";
 
@@ -95,10 +98,97 @@ describe("forecast candidate selection", () => {
     expect(candidate.score.atmosphere).toBe(20);
   });
 
+  it("does not let a CAVOK report hide a mid-level cloud deck the METAR cannot see", () => {
+    // European METARs report cloud below ~1,500 m only: CAVOK says nothing about altostratus.
+    const payload = targetPayload({ 22: { cape: 900, precipitation: 1, code: 95 } });
+    const hours = observerHours(80, 0, 30_000).map((hour) => ({ ...hour, cloudCoverMid: 80 }));
+    const candidate = buildCandidate(sparta, payload, hours, metar({}), "2026-07-15T00:00:00Z", start)!;
+    expect(candidate.scoreInput.observerCloudPercent).toBe(80);
+    // Blocking 80·0.85 = 68 → 20·0.32 + 10·(10 000/30 000) ≈ 10.
+    expect(candidate.score.atmosphere).toBe(10);
+  });
+
+  it("skips hours with instability but neither rain nor a thunderstorm code", () => {
+    const payload = targetPayload({ 22: { cape: 1_500, precipitation: 0, code: 0 } });
+    expect(buildCandidate(sparta, payload, observerHours(0, 0, 30_000), noMetar, "2026-07-15T00:00:00Z", start)).toBeNull();
+  });
+
+  it("keeps a rainy hour with modest instability", () => {
+    // Cells with 0.2–1 mm of rain and CAPE 100–250 J/kg had lightning nearby 35 % of the time.
+    const payload = targetPayload({ 22: { cape: 150, precipitation: 0.5, code: 61 } });
+    expect(buildCandidate(sparta, payload, observerHours(0, 0, 30_000), noMetar, "2026-07-15T00:00:00Z", start)?.forecastValidAt).toBe("2026-07-15T22:00Z");
+  });
+
+  it("marks a forecast target with the location error the verification found", () => {
+    // Forecast cells that had lightning nearby were 52 km from the storm centre at the median, 74 km at the 75th percentile.
+    const payload = targetPayload({ 22: { cape: 900, precipitation: 1, code: 95 } });
+    const candidate = buildCandidate(sparta, payload, observerHours(0, 0, 30_000), noMetar, "2026-07-15T00:00:00Z", start)!;
+    expect(candidate.uncertaintyKm).toBeGreaterThanOrEqual(75);
+  });
+
+  it("lowers the sky score for cloud along the line of sight towards the target", () => {
+    const payload = targetPayload({ 22: { cape: 900, precipitation: 1, code: 95 } });
+    const clearSite = observerHours(0, 0, 30_000);
+    // A cloud deck 40–90 km out in every direction, where a low view towards the storm crosses it.
+    const deck = pathSampleGrid(sparta).map((sample) => ({ ...sample, hours: clearSite.map((hour) => ({ ...hour, cloudCoverMid: 95, cloudCoverHigh: 95 })) }));
+    const without = buildCandidate(sparta, payload, clearSite, noMetar, "2026-07-15T00:00:00Z", start)!;
+    const withDeck = buildCandidate(sparta, payload, clearSite, noMetar, "2026-07-15T00:00:00Z", start, null, deck)!;
+    expect(withDeck.scoreInput.pathCloudPercent).toBe(95);
+    expect(withDeck.score.atmosphere).toBeLessThan(without.score.atmosphere);
+  });
+
   it("ignores a stale METAR", () => {
     const payload = targetPayload({ 22: { cape: 900, precipitation: 1, code: 95 } });
     const candidate = buildCandidate(sparta, payload, observerHours(10, 10, 30_000), metar({ status: "stale", cloudCoverPercent: 100, visibilityM: 1_000 }), "2026-07-15T00:00:00Z", start);
     expect(candidate!.score.atmosphere).toBe(28);
+  });
+});
+
+describe("forecast scan grid", () => {
+  it("samples every 15° and every 100 km, so storms between the old 45° spokes are not missed", () => {
+    // Verified Oct 2025–Feb 2026 (200–600 km): 24 cells had a target near 27 % of the large storms, this grid 76 %.
+    const grid = screeningGrid(sparta, 200, 600).map((point) => inverseGeodesic(sparta, point));
+    expect(grid).toHaveLength(96);
+    expect([...new Set(grid.map((g) => Math.round(g.distanceM / 1000)))].sort((a, b) => a - b)).toEqual([250, 350, 450, 550]);
+    expect(new Set(grid.map((g) => Math.round(g.initialBearingDeg) % 360)).size).toBe(24);
+    expect(grid.every((g) => Math.round(g.initialBearingDeg) % 15 === 0)).toBe(true);
+    expect(screeningGrid(sparta, 100, 600)).toHaveLength(120);
+  });
+});
+
+describe("duplicate forecast targets", () => {
+  const target = (id: string, distanceKm: number, bearingDeg: number, validAt: string, total: number) =>
+    ({ id, source: "forecast", coordinates: destinationPoint(sparta, distanceKm, bearingDeg), forecastValidAt: validAt, score: { total } }) as unknown as StormCandidate;
+
+  it("keeps the best of neighbouring cells that show the same storm, and storms elsewhere or later", () => {
+    const best = target("best", 300, 90, "2026-07-15T22:00Z", 60);
+    const neighbour = target("neighbour", 300, 101, "2026-07-15T23:00Z", 55); // ~58 km away, 1 h later
+    const elsewhere = target("elsewhere", 300, 150, "2026-07-15T22:00Z", 50);
+    const nextDay = target("next-day", 300, 101, "2026-07-16T20:00Z", 45);
+    expect(dropNearbyForecasts([neighbour, elsewhere, best, nextDay]).map((candidate) => candidate.id)).toEqual(["best", "elsewhere", "next-day"]);
+  });
+});
+
+describe("cloud along the line of sight", () => {
+  const time = "2026-07-15T22:00Z";
+  const sample = (bearingDeg: number, distanceKm: number, low: number, mid: number, high: number) => ({
+    bearingDeg, distanceKm, hours: [{ ...observerHours(0, 0, 30_000)[22], cloudCoverLow: low, cloudCoverMid: mid, cloudCoverHigh: high }],
+  });
+
+  it("takes the layer the view crosses at each distance", () => {
+    // At 8° the view is ~5.8 km up 40 km out (mid layer) and ~13 km up 90 km out (above the cloud).
+    expect(pathCloudPercent([sample(90, 40, 100, 0, 0), sample(90, 90, 100, 0, 100)], 90, 8, time)).toBe(0);
+    expect(pathCloudPercent([sample(90, 40, 0, 85, 0), sample(90, 90, 0, 0, 0)], 90, 8, time)).toBe(85);
+    // At 2° it is ~1.5 km up 40 km out (low layer) and ~3.8 km 90 km out (mid layer).
+    expect(pathCloudPercent([sample(90, 40, 70, 0, 0), sample(90, 90, 0, 40, 0)], 90, 2, time)).toBe(70);
+    // At 25° it clears every layer within 40 km.
+    expect(pathCloudPercent([sample(90, 40, 100, 100, 100), sample(90, 90, 100, 100, 100)], 90, 25, time)).toBe(0);
+  });
+
+  it("uses the samples nearest the target's bearing", () => {
+    const samples = [sample(0, 40, 0, 90, 0), sample(30, 40, 0, 10, 0)];
+    expect(pathCloudPercent(samples, 25, 8, time)).toBe(10);
+    expect(pathCloudPercent([], 25, 8, time)).toBeNull();
   });
 });
 

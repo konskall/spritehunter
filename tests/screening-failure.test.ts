@@ -37,7 +37,8 @@ describe("failed scan cells", () => {
 
     const failed = await fetchOpportunities(observer, 200, 600, { serverOnlySources: false });
     const message = failed.providers.find((provider) => provider.id === "open_meteo")!.message.en;
-    expect(message).toContain("0/24 scan cells answered");
+    // 200–600 km: four rings, every 15°.
+    expect(message).toContain("0/96 scan cells answered");
     expect(message).toContain("HTTP 429");
 
     status = 200;
@@ -48,6 +49,6 @@ describe("failed scan cells", () => {
 
     vi.setSystemTime(Date.UTC(2026, 9, 14, 1, 3));
     const recovered = await fetchOpportunities(observer, 200, 600, { serverOnlySources: false });
-    expect(recovered.providers.find((provider) => provider.id === "open_meteo")!.message.en).toContain("24 scan cells available");
+    expect(recovered.providers.find((provider) => provider.id === "open_meteo")!.message.en).toContain("96 scan cells available");
   });
 });

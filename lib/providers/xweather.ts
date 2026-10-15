@@ -67,7 +67,7 @@ const summarySchema = z.object({
       positive: z.number().optional(),
       negative: z.number().optional(),
     }).passthrough(),
-    peakAmp: z.object({ positive: amplitude.optional() }).passthrough().optional(),
+    peakAmp: z.object({ positive: amplitude.optional(), negative: amplitude.optional() }).passthrough().optional(),
   }).passthrough(),
 });
 const envelopeSchema = z.object({
@@ -87,17 +87,22 @@ export function parseCgSummary(raw: unknown, retrievedAt: string, windowMinutes:
   if (!envelope.success) throw new Error(`Xweather ${envelope.error?.code ?? "error"}${envelope.error?.description ? `: ${envelope.error.description}` : ""}`);
   const record = Array.isArray(envelope.response) ? envelope.response[0] : envelope.response;
   // warn_no_data (an empty response) means no strokes in the window, which is a real answer.
-  if (!record) return { windowMinutes, cgCount: 0, positiveCount: 0, negativeCount: 0, maxPositiveKa: null, retrievedAt };
+  if (!record) return { windowMinutes, cgCount: 0, positiveCount: 0, negativeCount: 0, maxPositiveKa: null, maxNegativeKa: null, retrievedAt };
   const { pulse, peakAmp } = record.summary;
   const positiveCount = pulse.positive ?? 0;
+  const negativeCount = pulse.negative ?? 0;
   const maxPositive = positiveCount > 0 ? peakAmp?.positive?.max ?? null : null;
+  // Negative peak currents come as magnitudes; the largest one is the strongest stroke.
+  const maxNegative = negativeCount > 0 ? peakAmp?.negative?.max ?? null : null;
+  // Peak amplitudes are reported in amperes.
+  const kiloamps = (amperes: number | null) => (amperes == null ? null : Math.round(Math.abs(amperes) / 1000));
   return {
     windowMinutes,
     cgCount: pulse.cg ?? pulse.count,
     positiveCount,
-    negativeCount: pulse.negative ?? 0,
-    // Peak amplitudes are reported in amperes.
-    maxPositiveKa: maxPositive == null ? null : Math.round(Math.abs(maxPositive) / 1000),
+    negativeCount,
+    maxPositiveKa: kiloamps(maxPositive),
+    maxNegativeKa: kiloamps(maxNegative),
     retrievedAt,
   };
 }

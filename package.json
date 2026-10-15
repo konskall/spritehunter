@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "verify": "node --experimental-transform-types --disable-warning=ExperimentalWarning --import ./scripts/verify/register.mjs scripts/verify/verify.ts"
   },
   "dependencies": {
     "lucide-react": "^1.31.0",

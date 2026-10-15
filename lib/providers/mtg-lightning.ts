@@ -31,35 +31,31 @@ const STALE_AFTER_MINUTES = 45;
 // MTG-I sits at 0°; beyond ~65° from the sub-satellite point the full disk has no useful data.
 const MTG_COVERAGE_DEGREES = 65;
 
-// Colours sampled along the EUMETView "mtg_li_afa" legend (x pixel → colour). Ticks:
-// 1 flash at x=149, 10 at x=405, 20+ at x=630 (count per pixel per 5 minutes).
-const LEGEND_SAMPLES: Array<[number, number, number, number]> = [
-  [152, 255, 255, 201], [164, 255, 249, 189], [176, 255, 246, 181], [188, 255, 240, 170], [200, 255, 237, 162],
-  [212, 255, 234, 155], [224, 255, 230, 146], [236, 254, 227, 139], [248, 254, 223, 132], [260, 254, 219, 124],
-  [272, 254, 212, 113], [284, 254, 205, 105], [296, 254, 198, 98], [308, 254, 191, 91], [320, 254, 185, 83],
-  [332, 254, 178, 76], [344, 254, 170, 72], [356, 253, 161, 68], [368, 253, 155, 66], [380, 253, 148, 63],
-  [392, 253, 142, 60], [404, 253, 131, 57], [416, 253, 119, 54], [428, 252, 107, 51], [440, 252, 92, 46],
-  [452, 252, 81, 42], [464, 248, 70, 40], [476, 244, 61, 37], [488, 240, 52, 35], [500, 235, 43, 32],
-  [512, 230, 33, 29], [524, 222, 23, 29], [536, 215, 18, 30], [548, 208, 13, 32], [560, 201, 8, 34],
-  [572, 195, 3, 36], [584, 188, 0, 37], [596, 176, 0, 38], [608, 161, 0, 38], [620, 150, 0, 38], [632, 139, 0, 38],
+// The colour of each whole flash count per pixel per 5 minutes, 1 to 20 (20 also stands for
+// more). Read from 43,000 lit pixels in 24 live frames (15 Oct 2026): the counts sit evenly
+// ~22 legend pixels apart, so the scale is linear, not logarithmic as once assumed; reading it
+// as logarithmic halved mid-range counts and never reached 20+.
+const AFA_PALETTE: Array<[number, number, number]> = [
+  [254, 249, 189], [254, 243, 173], [255, 236, 158], [254, 229, 143], [254, 222, 128],
+  [254, 213, 113], [254, 200, 98], [254, 186, 83], [254, 172, 72], [254, 160, 66],
+  [253, 145, 61], [253, 123, 52], [253, 104, 46], [252, 86, 42], [235, 66, 40],
+  [234, 43, 32], [225, 28, 30], [212, 16, 33], [192, 14, 37], [182, 3, 38],
 ];
-const legendCount = (x: number) => (x <= 405 ? 10 ** ((x - 149) / 256) : Math.min(20, 10 + (x - 405) / 22.5));
-const LEGEND = LEGEND_SAMPLES.map(([x, r, g, b]) => ({ r, g, b, count: legendCount(x) }));
 const colourCounts = new Map<number, number>();
 
-/** Approximate flashes per pixel per 5 minutes from the rendered AFA colour. */
+/** Flashes per pixel per 5 minutes from the rendered AFA colour; 20 means 20 or more. */
 export function flashCountFromColor(r: number, g: number, b: number) {
   const key = (r << 16) | (g << 8) | b;
   const cached = colourCounts.get(key);
   if (cached !== undefined) return cached;
-  let best = LEGEND[0];
+  let count = 1;
   let bestDistance = Number.POSITIVE_INFINITY;
-  for (const stop of LEGEND) {
-    const distance = (stop.r - r) ** 2 + (stop.g - g) ** 2 + (stop.b - b) ** 2;
-    if (distance < bestDistance) { bestDistance = distance; best = stop; }
-  }
-  colourCounts.set(key, best.count);
-  return best.count;
+  AFA_PALETTE.forEach(([pr, pg, pb], index) => {
+    const distance = (pr - r) ** 2 + (pg - g) ** 2 + (pb - b) ** 2;
+    if (distance < bestDistance) { bestDistance = distance; count = index + 1; }
+  });
+  colourCounts.set(key, count);
+  return count;
 }
 
 /** GeoServer reports the time it actually rendered in a `Warning: 99 … time=…` header. */
@@ -225,7 +221,9 @@ export function clusterLightningFrames(frames: LightningFrame[], bounds: GeoBoun
       windowMinutes: frames.length * FRAME_MINUTES,
     });
   }
-  return clusters.sort((a, b) => b.areaKm2 - a.areaKm2).slice(0, 40);
+  // All storms: the check for lightning near a forecast cell must see small ones too.
+  // The response lists only the largest (see fetchOpportunities).
+  return clusters.sort((a, b) => b.areaKm2 - a.areaKm2);
 }
 
 async function fetchFrame(bounds: GeoBounds, width: number, height: number, time?: string): Promise<LightningFrame> {

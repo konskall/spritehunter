@@ -22,6 +22,15 @@ export function isSearchRange(value: unknown): value is { min: number; max: numb
   return isRecord(value) && finiteIn(value.min, 100, 800) && finiteIn(value.max, 100, 800) && (value.min as number) < (value.max as number);
 }
 
+/**
+ * The range stored by versions before the 100 km default: a range the user chose is kept,
+ * the untouched old default (200–600 km) is not, since it left out storms 100–200 km away.
+ */
+export function migrateSearchRange(value: unknown): { min: number; max: number } | null {
+  if (!isSearchRange(value) || (value.min === 200 && value.max === 600)) return null;
+  return { min: value.min, max: value.max };
+}
+
 export function isLensList(value: unknown): value is LensProfile[] {
   return Array.isArray(value) && value.length > 0 && value.every((lens) => isRecord(lens)
     && typeof lens.id === "string"

@@ -15,7 +15,17 @@ describe("Xweather CG summary", () => {
 
   it("reads CG counts by polarity and the strongest positive stroke in kA", () => {
     const result = parseCgSummary(summary({ count: 14, cg: 14, ic: 0, positive: 3, negative: 11 }, 87_400), retrievedAt, 15);
-    expect(result).toEqual({ windowMinutes: 15, cgCount: 14, positiveCount: 3, negativeCount: 11, maxPositiveKa: 87, retrievedAt });
+    expect(result).toEqual({ windowMinutes: 15, cgCount: 14, positiveCount: 3, negativeCount: 11, maxPositiveKa: 87, maxNegativeKa: null, retrievedAt });
+  });
+
+  it("reads the strongest negative stroke, which drives ELVES", () => {
+    // Xweather lists negative peak currents as magnitudes in amperes (379000 in its example).
+    const raw = {
+      success: true,
+      error: null,
+      response: { summary: { pulse: { count: 9, cg: 9, positive: 0, negative: 9 }, peakAmp: { count: 9, negative: { min: 4_000, max: 143_400, avg: 30_000 } } } },
+    };
+    expect(parseCgSummary(raw, retrievedAt, 15).maxNegativeKa).toBe(143);
   });
 
   it("accepts the array form of the response", () => {
@@ -25,7 +35,7 @@ describe("Xweather CG summary", () => {
 
   it("treats warn_no_data as a storm without CG strokes", () => {
     const result = parseCgSummary({ success: true, error: { code: "warn_no_data", description: "No data" }, response: [] }, retrievedAt, 15);
-    expect(result).toEqual({ windowMinutes: 15, cgCount: 0, positiveCount: 0, negativeCount: 0, maxPositiveKa: null, retrievedAt });
+    expect(result).toEqual({ windowMinutes: 15, cgCount: 0, positiveCount: 0, negativeCount: 0, maxPositiveKa: null, maxNegativeKa: null, retrievedAt });
   });
 
   it("stops calling near the end of the allowance until the period resets", () => {
@@ -120,8 +130,9 @@ describe("scoring with CG polarity and sky consensus", () => {
     const large = { ...storm, areaKm2: 10_000, maxFlashesPer5Min: 20 };
     const strong = scoreOpportunity({ ...base, capeJkg: 1_500, observedLightning: { ...large, cg: cg(11, 103) }, terrain: "unknown" });
     const negative = scoreOpportunity({ ...base, capeJkg: 1_500, observedLightning: { ...large, cg: cg(0, null) }, terrain: "unknown" });
-    expect(strong.activity).toBe(35);
-    expect(negative.activity).toBe(27);
+    // Model share 6 + lightning 9 + 3.5·log10(10 000/50) ≈ 8.05 + 2 + 1 ≈ 26; strong +CG adds 8.
+    expect(strong.activity).toBe(34);
+    expect(negative.activity).toBe(26);
     expect(strong.total).toBeGreaterThan(negative.total);
   });
 

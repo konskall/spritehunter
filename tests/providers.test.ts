@@ -122,4 +122,19 @@ describe("NOAA OVATION aurora data", () => {
     const result = assessAurora(null, coordinates, 40, 0.5);
     expect(result.localProbabilityPercent).toBe(7);
   });
+  // The live grid at Kp 0.67 on 15 Oct 2026: the usual polar oval, nothing south of 58°N.
+  const quietOval = parseOvationCoordinates({ coordinates: [[22, 45, 0], [22, 58, 1], [22, 62, 3], [22, 66, 11], [22, 70, 20], [39, 71, 24]] });
+  it("stays quiet when only the polar oval, far beyond the horizon, is active", () => {
+    const result = assessAurora(0.67, quietOval, sparta.latitude, sparta.longitude);
+    expect(result.level).toBe("quiet");
+    // 58°N is ~2,300 km from Sparta: even 400 km high aurora there is below the horizon.
+    expect(result.northernSectorProbabilityPercent).toBe(0);
+  });
+  it("reports possible aurora once the oval comes within view to the north", () => {
+    // 51°N at 22°E is ~1,550 km from Sparta: aurora ~300 km up shows a few degrees above the horizon.
+    const storm = parseOvationCoordinates({ coordinates: [...quietOval, [22, 51, 12]] });
+    const result = assessAurora(5, storm, sparta.latitude, sparta.longitude);
+    expect(result.level).toBe("possible");
+    expect(result.northernSectorProbabilityPercent).toBe(12);
+  });
 });

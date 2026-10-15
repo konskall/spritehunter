@@ -9,7 +9,7 @@ const querySchema = z.object({
   lat: numberParam(-90, 90),
   lon: numberParam(-180, 180),
   elevation: optionalNumberParam(-500, 9000, 210),
-  minKm: optionalNumberParam(100, 800, 200),
+  minKm: optionalNumberParam(100, 800, 100),
   maxKm: optionalNumberParam(100, 800, 600),
 });
 // Each uncached scan costs several upstream forecast requests.

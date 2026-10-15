@@ -9,7 +9,7 @@ import { followSelection } from "@/lib/selection";
 import { createId } from "@/lib/utils";
 import type { StormCandidate } from "@/lib/domain";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
-import { isAlertPrefs, isLensList, isLocationList, isSavedLocation, isSearchRange } from "@/lib/persisted-validators";
+import { isAlertPrefs, isLensList, isLocationList, isSavedLocation, isSearchRange, migrateSearchRange } from "@/lib/persisted-validators";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
 
 describe("camera pointing from device orientation", () => {
@@ -122,6 +122,13 @@ describe("persisted state validation", () => {
     expect(isSearchRange({ min: 200, max: 600 })).toBe(true);
     expect(isSearchRange({ min: 600, max: 200 })).toBe(false);
     expect(isSearchRange({ min: 50, max: 600 })).toBe(false);
+  });
+  it("carries a chosen scan range over, but not the old 200–600 km default", () => {
+    // Real sprites came from storms 80–200 km away that the old default left out.
+    expect(migrateSearchRange({ min: 200, max: 600 })).toBeNull();
+    expect(migrateSearchRange({ min: 150, max: 500 })).toEqual({ min: 150, max: 500 });
+    expect(migrateSearchRange({ min: 600, max: 200 })).toBeNull();
+    expect(migrateSearchRange(null)).toBeNull();
   });
   it("rejects alert preferences with an unusable threshold or quiet window", () => {
     const prefs = { minimumScore: 60, confidence: "medium", cooldown: 90, quietStart: "01:00", quietEnd: "08:00" };
