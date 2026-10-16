@@ -15,6 +15,7 @@ import {
   ChevronDown,
   ChevronRight,
   Cloud,
+  CloudSun,
   Compass,
   Crosshair,
   Database,
@@ -65,6 +66,7 @@ import { cameraPointing } from "@/lib/orientation";
 import { parseNumericDraft } from "@/lib/number-input";
 import { rescoreWithTerrain } from "@/lib/scoring";
 import { elevationSpan, jetEnvelope } from "@/lib/pointing";
+import { directionLabel } from "@/lib/weather";
 import { evaluateAlert, type AlertPreferences } from "@/lib/notifications";
 import { isAlertPrefs, isLanguage, isLastAlert, isLensList, isLocationList, isLogEntry, isLogList, isOrientation, isSavedLocation, isSearchRange, isString, migrateSearchRange } from "@/lib/persisted-validators";
 import MapLoader, { type MapLoadState } from "@/components/MapLoader";
@@ -74,8 +76,10 @@ import { APP_VERSION } from "@/lib/version";
 import { CREATOR, LANGUAGE_PATHS, SEO_COPY } from "@/lib/seo-copy";
 
 const StormMap = dynamic(() => import("@/components/StormMap"), { ssr: false });
+// The weather screen and its charts load only when opened.
+const WeatherView = dynamic(() => import("@/components/WeatherView"), { ssr: false });
 
-type Screen = "dashboard" | "map" | "forecast" | "point" | "sky" | "aurora" | "locations" | "camera" | "logbook" | "alerts" | "settings";
+type Screen = "dashboard" | "map" | "forecast" | "point" | "sky" | "aurora" | "weather" | "locations" | "camera" | "logbook" | "alerts" | "settings";
 
 const LanguageContext = createContext<Language>("el");
 
@@ -130,6 +134,7 @@ const navItems: Array<{ id: Screen; label: string; labelEn: string; icon: Lucide
   { id: "point", label: "Στόχευση", labelEn: "Point camera", icon: Crosshair },
   { id: "sky", label: "Ορίζοντας", labelEn: "Sky view", icon: Orbit },
   { id: "aurora", label: "Σέλας", labelEn: "Aurora", icon: Sparkles },
+  { id: "weather", label: "Καιρός", labelEn: "Weather", icon: CloudSun },
   { id: "locations", label: "Θέσεις", labelEn: "Locations", icon: MapPin },
   { id: "camera", label: "Εξοπλισμός", labelEn: "Camera setup", icon: Camera },
   { id: "logbook", label: "Ημερολόγιο", labelEn: "Logbook", icon: BookOpen },
@@ -289,12 +294,6 @@ async function showBrowserNotification(title: string, body: string) {
     }
     new Notification(title, options);
   } catch { /* Notifications can be blocked by the platform. */ }
-}
-
-function directionLabel(degrees: number, language: Language) {
-  const greek = ["Β", "ΒΒΑ", "ΒΑ", "ΑΒΑ", "Α", "ΑΝΑ", "ΝΑ", "ΝΝΑ", "Ν", "ΝΝΔ", "ΝΔ", "ΔΝΔ", "Δ", "ΔΒΔ", "ΒΔ", "ΒΒΔ"];
-  const english = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
-  return (language === "el" ? greek : english)[Math.round(degrees / 22.5) % 16];
 }
 
 function categoryLabel(candidate: StormCandidate | null, language: Language) {
@@ -747,6 +746,7 @@ export default function SpriteHunterApp({ initialLanguage }: { initialLanguage: 
           {screen === "point" && <PointView candidate={selected} observer={observer} lens={selectedLens} fov={fov} framing={framing} terrain={terrain} terrainLoading={terrainLoading && !terrain} sky={currentSky} language={language} />}
           {screen === "sky" && <SkyView candidate={selected} observer={observer} terrain={terrain} fov={fov} lens={selectedLens} orientation={orientation} sky={currentSky} onOrientation={setOrientation} />}
           {screen === "aurora" && <AuroraView aurora={aurora} loading={auroraLoading} lens={selectedLens} observer={site} forecast={data?.observerForecast ?? []} />}
+          {screen === "weather" && <WeatherView key={`${observer.latitude}:${observer.longitude}`} language={language} observer={site} scan={data} refreshKey={checkedAt} onMap={() => setScreen("map")} onLocations={() => setScreen("locations")} />}
           {screen === "locations" && <LocationsView observer={site} locations={siteList} candidate={selected} onObserver={setObserver} onLocations={setLocations} />}
           {screen === "camera" && <CameraView candidate={selected} lenses={lenses} selectedLens={selectedLens} fov={fov} framing={framing} orientation={orientation} sky={currentSky} onSelect={setSelectedLensId} onLenses={setLenses} onOrientation={setOrientation} />}
           {screen === "logbook" && <LogbookView logs={logs} candidate={selected} lens={selectedLens} onLogs={setLogs} />}

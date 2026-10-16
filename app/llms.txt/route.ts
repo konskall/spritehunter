@@ -17,6 +17,14 @@ What it does:
 - Gives the true azimuth, the elevation band where sprites appear (50–90 km altitude) widened by the uncertainty in the storm's distance, a separate band for blue and gigantic jets (15–50 km), the field of view of the chosen lens, and a terrain line-of-sight check against a 30 m elevation model.
 - Guides the phone camera with the device compass, corrected from magnetic to true north with the World Magnetic Model 2025.
 - Shows the NOAA OVATION aurora forecast; aurora counts as possible only where it would rise above the horizon (within ~1,600 km to the north).
+- Has a weather station screen for the observing site. It shows:
+  - current conditions next to the nearest airport's METAR/TAF
+  - 48-hour charts and a 7-day forecast
+  - a night outlook for photography: dark window, moonless hours, cloud, dew on the lens, gusts, cold, transparency
+  - twilight times, the Moon's phase with its next principal phases, and moonrise and moonset
+  - local instability and storms, MTG-LI lightning near the site, and MeteoAlarm warnings
+  - CAMS air quality: European AQI, particles, gases, dust, AOD, pollen
+  - the site's light-pollution class
 
 How the index is built (maximum points):
 

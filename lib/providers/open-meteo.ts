@@ -17,6 +17,7 @@ import { altitudeEnvelope, destinationPoint, inverseGeodesic, lookAngles } from 
 import { skyState } from "@/lib/astronomy";
 import { modelActivity, scoreOpportunity } from "@/lib/scoring";
 import { pathCloudPercent, pathSampleGrid, type PathSample } from "@/lib/line-of-sight";
+import { isStormHour, isThunderCode } from "@/lib/weather";
 import { fetchJsonWithRetry } from "@/lib/providers/fetch";
 import { InFlight, TtlCache } from "@/lib/bounded-cache";
 import { tx, type Localized } from "@/lib/i18n";
@@ -303,15 +304,6 @@ function chunks<T>(values: T[], size: number) {
 /** The model's storm signal for an hour, the same one the score uses. */
 const stormSignal = (hour: WeatherHour) => modelActivity({ ...hour, thunderCode: isThunderCode(hour.weatherCode) });
 
-/**
- * A model hour worth a target: a thunderstorm code, or rain with some instability. Instability
- * alone was a poor sign (2–12 % of such cells had lightning nearby); with this rule the scan found
- * 88 % of the large storms, against 76 % before, and more of its cells were right (48 % vs 38 %).
- */
-export function isStormHour(hour: Pick<WeatherHour, "capeJkg" | "precipitationMm" | "weatherCode">) {
-  return isThunderCode(hour.weatherCode) || ((hour.capeJkg ?? 0) >= 100 && (hour.precipitationMm ?? 0) >= 0.2);
-}
-
 function emptyHour(time: string): WeatherHour {
   return {
     time, temperatureC: null, relativeHumidity: null, precipitationMm: null, precipitationProbability: null,
@@ -320,8 +312,6 @@ function emptyHour(time: string): WeatherHour {
     precipitableWaterKgM2: null, weatherCode: null,
   };
 }
-
-const isThunderCode = (code: number | null) => code != null && [95, 96, 99].includes(code);
 
 function closestHour(hours: WeatherHour[], time: string) {
   const index = nearestIndex(timesOf(hours, (hour) => hour.time), Date.parse(time));

@@ -16,7 +16,8 @@ import { inverseGeodesic } from "@/lib/geodesy";
 import { skyState } from "@/lib/astronomy";
 import { scoreOpportunity } from "@/lib/scoring";
 import { clusterLightningFrames, lightningBounds, lightningFrameSize, parseWmsTimeHeader, type GeoBounds } from "@/lib/providers/mtg-lightning";
-import { isStormHour, screeningGrid } from "@/lib/providers/open-meteo";
+import { screeningGrid } from "@/lib/providers/open-meteo";
+import { isStormHour } from "@/lib/weather";
 
 const CACHE = new URL("../../.verify-cache/", import.meta.url);
 const WMS = "https://view.eumetsat.int/geoserver/wms";

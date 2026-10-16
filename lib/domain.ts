@@ -66,6 +66,95 @@ export interface AirQualityHour {
   aerosolOpticalDepth: number | null;
 }
 
+/** Model conditions at the observer for one instant (the weather station screen). */
+export interface StationConditions {
+  time: string;
+  temperatureC: number | null;
+  apparentTemperatureC: number | null;
+  relativeHumidity: number | null;
+  dewPointC: number | null;
+  /** Sea-level pressure, hPa. */
+  pressureHpa: number | null;
+  windSpeedKmh: number | null;
+  windGustsKmh: number | null;
+  windDirectionDeg: number | null;
+  cloudCover: number | null;
+  precipitationMm: number | null;
+  visibilityM: number | null;
+  uvIndex: number | null;
+  weatherCode: number | null;
+  isDay: boolean | null;
+}
+
+export interface StationHour extends StationConditions {
+  precipitationProbability: number | null;
+  cloudCoverLow: number | null;
+  cloudCoverMid: number | null;
+  cloudCoverHigh: number | null;
+  capeJkg: number | null;
+  liftedIndex: number | null;
+  convectiveInhibitionJkg: number | null;
+  freezingLevelM: number | null;
+}
+
+export interface StationDay {
+  /** Start of the day in Athens time. */
+  date: string;
+  weatherCode: number | null;
+  temperatureMaxC: number | null;
+  temperatureMinC: number | null;
+  precipitationMm: number | null;
+  precipitationProbability: number | null;
+  precipitationHours: number | null;
+  windSpeedMaxKmh: number | null;
+  windGustsMaxKmh: number | null;
+  windDirectionDeg: number | null;
+  uvIndexMax: number | null;
+  sunshineHours: number | null;
+}
+
+/** CAMS air quality. The `aqi*` values are European AQI sub-indices (0–100+, higher is worse). */
+export interface AirQualityConditions {
+  time: string;
+  europeanAqi: number | null;
+  aqiPm2_5: number | null;
+  aqiPm10: number | null;
+  aqiNitrogenDioxide: number | null;
+  aqiOzone: number | null;
+  aqiSulphurDioxide: number | null;
+  pm2_5: number | null;
+  pm10: number | null;
+  carbonMonoxide: number | null;
+  nitrogenDioxide: number | null;
+  sulphurDioxide: number | null;
+  ozone: number | null;
+  dust: number | null;
+  aerosolOpticalDepth: number | null;
+  /** Pollen in grains/m³; CAMS forecasts it for Europe in season. */
+  pollen: Record<PollenType, number | null>;
+}
+
+export type PollenType = "alder" | "birch" | "grass" | "mugwort" | "olive" | "ragweed";
+
+export interface WeatherStationResponse {
+  status: DataStatus;
+  retrievedAt: string;
+  observer: Coordinates;
+  /** Elevation of the model point, which its temperatures refer to. */
+  modelElevationM: number | null;
+  current: StationConditions | null;
+  /** From a few hours before now (for the pressure tendency) to 48 hours ahead. */
+  hours: StationHour[];
+  days: StationDay[];
+  airQuality: {
+    status: DataStatus;
+    current: AirQualityConditions | null;
+    hours: AirQualityConditions[];
+    message: Localized;
+  };
+  message: Localized;
+}
+
 export interface PointingAltitude {
   altitudeKm: number;
   elevationDeg: number;

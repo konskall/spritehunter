@@ -7,6 +7,11 @@ import { angularDifference } from "@/lib/geodesy";
 const HORIZON_REFRACTION_DEG = (0.0002967 / Math.tan(0.00312536 / 0.08901179)) * (180 / Math.PI);
 const trueSunAltitude = (apparentDeg: number) => (apparentDeg < HORIZON_REFRACTION_DEG ? apparentDeg - HORIZON_REFRACTION_DEG : apparentDeg);
 
+/** The Sun's altitude for twilight: true below the horizon, apparent above it. */
+export function sunAltitudeDeg(date: Date, latitude: number, longitude: number) {
+  return trueSunAltitude(SunCalc.getPosition(date, latitude, longitude).altitude);
+}
+
 export function skyState(date: Date, latitude: number, longitude: number, targetBearingDeg?: number) {
   const position = SunCalc.getPosition(date, latitude, longitude);
   const sun = { ...position, altitude: trueSunAltitude(position.altitude) };
