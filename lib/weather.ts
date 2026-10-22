@@ -1,4 +1,4 @@
-import type { AirQualityConditions, Coordinates, LightningCluster, StationHour, WeatherHour } from "@/lib/domain";
+import type { AirQualityConditions, AlertLevel, Coordinates, LightningCluster, StationHour, WeatherAlert, WeatherHour } from "@/lib/domain";
 import { inverseGeodesic } from "@/lib/geodesy";
 import { tx, type Language, type Localized } from "@/lib/i18n";
 
@@ -29,6 +29,90 @@ export function stormPeriods(hours: Array<Pick<StationHour, "time" | "capeJkg" |
     }
   }
   return periods;
+}
+
+// Observed lightning this close (to the storm's edge) is a danger at the site; up to the second, it is near.
+const LIGHTNING_CLOSE_KM = 20;
+const LIGHTNING_NEAR_KM = 60;
+// An atmosphere this unstable can grow storms that the model's hours do not show.
+const UNSTABLE_CAPE_JKG = 500;
+const UNSTABLE_LIFTED_INDEX = -2;
+
+export type LocalStormStatus = "lightning_close" | "lightning_near" | "thunder" | "rain_unstable" | "unstable" | "quiet";
+
+/** Storm risk at the site: observed lightning first, then the model's storm hours, then instability. */
+export function localStormStatus({ periods, lightningKm, capeMax, liftedMin }: {
+  periods: Array<{ thunder: boolean }>; lightningKm: number | null; capeMax: number | null; liftedMin: number | null;
+}): LocalStormStatus {
+  if (lightningKm != null && lightningKm <= LIGHTNING_CLOSE_KM) return "lightning_close";
+  if (lightningKm != null && lightningKm <= LIGHTNING_NEAR_KM) return "lightning_near";
+  if (periods.some((period) => period.thunder)) return "thunder";
+  if (periods.length) return "rain_unstable";
+  if ((capeMax ?? 0) >= UNSTABLE_CAPE_JKG && (liftedMin ?? 0) <= UNSTABLE_LIFTED_INDEX) return "unstable";
+  return "quiet";
+}
+
+/** Whether two sites are the same place; a scan answers for the exact coordinates it was asked for. */
+export function isSameSite(a: Coordinates, b: Coordinates) {
+  return Math.abs(a.latitude - b.latitude) < 1e-6 && Math.abs(a.longitude - b.longitude) < 1e-6;
+}
+
+type RainHour = Pick<StationHour, "time" | "precipitationMm" | "precipitationProbability">;
+
+/**
+ * Open-Meteo stamps each hour's precipitation and its probability at the end of the hour: the
+ * 10:00 value is the 09:00–10:00 sum. This gives every hour the rain of the hour that follows it.
+ */
+export function rainAhead(hours: RainHour[]) {
+  return hours.map((hour, index) => {
+    const next = hours[index + 1];
+    const follows = next != null && Date.parse(next.time) - Date.parse(hour.time) === 3_600_000;
+    return { mm: follows ? next.precipitationMm : null, chance: follows ? next.precipitationProbability : null };
+  });
+}
+
+/** Rain in the coming hour: the clock hour that holds most of the next 60 minutes. */
+export function rainNextHour(hours: RainHour[], nowMs: number) {
+  const start = Math.floor((nowMs + 30 * 60_000) / 3_600_000) * 3_600_000;
+  const row = hours.find((hour) => Date.parse(hour.time) === start + 3_600_000);
+  return row ? { mm: row.precipitationMm, chance: row.precipitationProbability } : null;
+}
+
+const ALERT_LEVEL_TEXT: Record<AlertLevel, Localized> = {
+  green: tx("Πράσινη", "Green"),
+  yellow: tx("Κίτρινη", "Yellow"),
+  orange: tx("Πορτοκαλί", "Orange"),
+  red: tx("Κόκκινη", "Red"),
+};
+// MeteoAlarm's awareness types, keyed by their name in lower case without spaces or hyphens.
+const ALERT_HAZARD_TEXT: Record<string, Localized> = {
+  thunderstorm: tx("Καταιγίδα", "Thunderstorm"),
+  thunderstorms: tx("Καταιγίδες", "Thunderstorms"),
+  rain: tx("Βροχή", "Rain"),
+  wind: tx("Άνεμος", "Wind"),
+  snowice: tx("Χιόνι και πάγος", "Snow and ice"),
+  snow: tx("Χιόνι", "Snow"),
+  fog: tx("Ομίχλη", "Fog"),
+  hightemperature: tx("Υψηλές θερμοκρασίες", "High temperature"),
+  hightemperatures: tx("Υψηλές θερμοκρασίες", "High temperature"),
+  lowtemperature: tx("Χαμηλές θερμοκρασίες", "Low temperature"),
+  lowtemperatures: tx("Χαμηλές θερμοκρασίες", "Low temperature"),
+  coastalevent: tx("Παράκτια φαινόμενα", "Coastal event"),
+  forestfire: tx("Κίνδυνος πυρκαγιάς", "Forest fire"),
+  avalanche: tx("Χιονοστιβάδες", "Avalanches"),
+  avalanches: tx("Χιονοστιβάδες", "Avalanches"),
+  flood: tx("Πλημμύρα", "Flood"),
+  flooding: tx("Πλημμύρα", "Flood"),
+  rainflood: tx("Βροχή και πλημμύρα", "Rain and flood"),
+};
+
+/** A MeteoAlarm warning's colour and hazard in both languages; unknown hazards stay as reported. */
+export function alertText(alert: Pick<WeatherAlert, "hazard" | "level">) {
+  const key = alert.hazard?.toLowerCase().replace(/[^a-z]/g, "") ?? "";
+  return {
+    level: alert.level ? ALERT_LEVEL_TEXT[alert.level] : null,
+    hazard: ALERT_HAZARD_TEXT[key] ?? (alert.hazard ? tx(alert.hazard, alert.hazard) : tx("Προειδοποίηση", "Warning")),
+  };
 }
 
 /**
@@ -186,6 +270,18 @@ export function capeLevel(cape: number | null): Level | null {
   return { level: 4, text: tx("Ακραία", "Extreme"), tone: "bad" };
 }
 
+/**
+ * Convective inhibition: the energy a rising parcel must first overcome, J/kg (Open-Meteo gives
+ * it as a positive number). Little of it lets storms start; a lot holds them back.
+ */
+export function cinLevel(cin: number | null): Level | null {
+  if (cin == null) return null;
+  if (cin < 25) return { level: 0, text: tx("Χωρίς φρένο: οι καταιγίδες ξεκινούν εύκολα", "No cap: storms start easily"), tone: "warn" };
+  if (cin < 100) return { level: 1, text: tx("Μέτριο φρένο στις καταιγίδες", "Moderate cap on storms"), tone: "fair" };
+  if (cin < 250) return { level: 2, text: tx("Ισχυρό φρένο στις καταιγίδες", "Strong cap on storms"), tone: "good" };
+  return { level: 3, text: tx("Πολύ ισχυρό φρένο: οι καταιγίδες δύσκολα ξεκινούν", "Very strong cap: storms struggle to start"), tone: "good" };
+}
+
 /** Lifted index: below 0 the air at 500 hPa is colder than a lifted parcel, so it can rise. */
 export function liftedIndexLevel(li: number | null): Level | null {
   if (li == null) return null;
@@ -194,28 +290,6 @@ export function liftedIndexLevel(li: number | null): Level | null {
   if (li > -4) return { level: 2, text: tx("Ασταθής", "Unstable"), tone: "warn" };
   if (li > -6) return { level: 3, text: tx("Πολύ ασταθής", "Very unstable"), tone: "bad" };
   return { level: 4, text: tx("Ακραία αστάθεια", "Extremely unstable"), tone: "bad" };
-}
-
-// Temperature/dew point ("17/12", "M02/M05", dew point may be missing) and pressure groups.
-// Remarks are cut first: US remarks carry other numeric groups.
-const TEMPERATURE_GROUP = /(?:^|\s)(M?\d{2})\/(M?\d{2})?(?=\s|$)/;
-const QNH_GROUP = /(?:^|\s)Q(\d{4})(?=\s|$)/;
-const ALTIMETER_GROUP = /(?:^|\s)A(\d{4})(?=\s|$)/;
-const HPA_PER_INHG = 33.8639;
-
-const metarNumber = (group: string) => (group.startsWith("M") ? -Number(group.slice(1)) : Number(group));
-
-/** Air temperature, dew point and sea-level pressure (QNH) from a raw METAR. */
-export function metarReadings(raw: string | null) {
-  const body = raw?.split(" RMK")[0] ?? "";
-  const temperature = TEMPERATURE_GROUP.exec(body);
-  const qnh = QNH_GROUP.exec(body);
-  const altimeter = ALTIMETER_GROUP.exec(body);
-  return {
-    temperatureC: temperature ? metarNumber(temperature[1]) : null,
-    dewPointC: temperature?.[2] ? metarNumber(temperature[2]) : null,
-    pressureHpa: qnh ? Number(qnh[1]) : altimeter ? Math.round((Number(altimeter[1]) / 100) * HPA_PER_INHG * 10) / 10 : null,
-  };
 }
 
 /** Conditions that matter for a night of photography, over the model hours in a window. */

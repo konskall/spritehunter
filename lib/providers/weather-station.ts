@@ -5,8 +5,10 @@ import { InFlight, TtlCache } from "@/lib/bounded-cache";
 import { tx } from "@/lib/i18n";
 
 // The weather screen: conditions, 48 hours and 7 days at the observer from Open-Meteo's best
-// model mix, and CAMS air quality. Times come as Unix seconds, so daylight-saving changes inside
-// the forecast cannot shift an hour; daily values are summed over Athens days.
+// model mix, and CAMS air quality. Times come as Unix seconds, so hourly values stay exact across
+// a clock change. Daily values are summed over Athens days, but Open-Meteo applies one UTC offset
+// (the one at request time) to the whole response: after a clock change within the 7 days, those
+// days run 23:00–23:00 (or 01:00–01:00) local time. Their dates stay right.
 
 const CACHE_TTL_MS = 15 * 60_000;
 // Hours before now, for the 3-hour pressure tendency.

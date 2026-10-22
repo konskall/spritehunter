@@ -40,7 +40,8 @@ function metar(overrides: Partial<AviationObservation>): AviationObservation {
   return {
     status: "available", stationId: "LGKL", stationName: "Kalamata", distanceKm: 36, observedAt: "2026-07-15T22:00:00.000Z",
     retrievedAt: "2026-07-15T22:05:00.000Z", visibilityM: 10_000, visibilityAtLeast: false, cloudCoverPercent: 0, cloudSummary: { el: "CAVOK", en: "CAVOK" },
-    windDirectionDeg: 0, windSpeedKmh: 0, weather: null, flightCategory: "VFR", rawMetar: "METAR LGKL 152200Z CAVOK",
+    windDirectionDeg: 0, windSpeedKmh: 0, windGustKmh: null, temperatureC: 21, dewPointC: 12, pressureHpa: 1014,
+    weather: null, flightCategory: "VFR", rawMetar: "METAR LGKL 152200Z CAVOK",
     rawTaf: null, tafValidFrom: null, tafValidTo: null, message: { el: "", en: "" }, ...overrides,
   };
 }

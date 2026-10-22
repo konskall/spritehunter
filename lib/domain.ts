@@ -98,7 +98,10 @@ export interface StationHour extends StationConditions {
 }
 
 export interface StationDay {
-  /** Start of the day in Athens time. */
+  /**
+   * Start of the day at the response's UTC offset (the one at request time): after a clock change
+   * that is 23:00 or 01:00 Athens time. Twelve hours later always falls on the day itself.
+   */
   date: string;
   weatherCode: number | null;
   temperatureMaxC: number | null;
@@ -323,6 +326,11 @@ export interface AviationObservation {
   cloudSummary: Localized | null;
   windDirectionDeg: number | null;
   windSpeedKmh: number | null;
+  windGustKmh: number | null;
+  temperatureC: number | null;
+  dewPointC: number | null;
+  /** Sea-level pressure (QNH), hPa. */
+  pressureHpa: number | null;
   weather: string | null;
   flightCategory: string | null;
   rawMetar: string | null;
@@ -332,11 +340,17 @@ export interface AviationObservation {
   message: Localized;
 }
 
+export type AlertLevel = "green" | "yellow" | "orange" | "red";
+
 export interface WeatherAlert {
   id: string;
   area: string;
   event: string;
   severity: string;
+  /** The hazard as MeteoAlarm names it ("Thunderstorm", "Rain", …), when given. */
+  hazard: string | null;
+  /** The MeteoAlarm colour, from the warning text or else its severity. */
+  level: AlertLevel | null;
   onset: string | null;
   expires: string | null;
   distanceKm: number | null;

@@ -1,11 +1,10 @@
 import * as SunCalc from "suncalc";
 import { sunAltitudeDeg } from "@/lib/astronomy";
-import { athensUtcOffsetMinutes } from "@/lib/time";
+import { athensNoon, athensUtcOffsetMinutes } from "@/lib/time";
 
 // Sun and Moon events for the weather screen. Days are Athens civil days, as everywhere in the
 // app. SunCalc's twilight times are solved on the true altitude, so they need no refraction fix.
 
-const DAY_MS = 86_400_000;
 export const SYNODIC_MONTH_DAYS = 29.530588;
 
 export interface SunDay {
@@ -129,6 +128,19 @@ export function moonDay(date: Date, latitude: number, longitude: number): MoonDa
   };
 }
 
+/** The next moonrise and moonset after `now`; a day without one is skipped. */
+export function nextMoonRiseSet(now: Date, latitude: number, longitude: number) {
+  let rise: Date | null = null;
+  let set: Date | null = null;
+  for (let day = 0; day <= 2 && (!rise || !set); day += 1) {
+    const noon = athensNoon(now, day);
+    const times = SunCalc.getMoonTimes(noon, latitude, longitude, athensUtcOffsetMinutes(noon));
+    if (!rise && times.rise && times.rise > now) rise = times.rise;
+    if (!set && times.set && times.set > now) set = times.set;
+  }
+  return { rise, set };
+}
+
 export interface NightWindow {
   /** Civil dusk to civil dawn: the night worth planning. */
   start: Date;
@@ -149,8 +161,9 @@ const SAMPLE_MS = 5 * 60_000;
 export function nightWindow(now: Date, latitude: number, longitude: number): NightWindow | null {
   const today = sunDay(now, latitude, longitude);
   const beforeDawn = today.civilDawn != null && now.getTime() < today.civilDawn.getTime();
-  const evening = beforeDawn ? sunDay(new Date(now.getTime() - DAY_MS), latitude, longitude) : today;
-  const morning = beforeDawn ? today : sunDay(new Date(now.getTime() + DAY_MS), latitude, longitude);
+  // Calendar steps: ±24 hours lands two days away on the night the clocks go forward.
+  const evening = beforeDawn ? sunDay(athensNoon(now, -1), latitude, longitude) : today;
+  const morning = beforeDawn ? today : sunDay(athensNoon(now, 1), latitude, longitude);
   const start = evening.civilDusk ?? evening.sunset;
   const end = morning.civilDawn ?? morning.sunrise;
   if (!start || !end || end <= start) return null;

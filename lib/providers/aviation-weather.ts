@@ -20,6 +20,11 @@ const metarSchema = z.object({
   visib: z.union([z.number(), z.string()]).nullable().optional(),
   wdir: z.union([z.number(), z.string()]).nullable().optional(),
   wspd: z.number().nullable().optional(),
+  wgst: z.number().nullable().optional(),
+  temp: z.number().nullable().optional(),
+  dewp: z.number().nullable().optional(),
+  // QNH in hPa (the API converts US altimeter settings from inHg).
+  altim: z.number().nullable().optional(),
   wxString: z.string().nullable().optional(),
   rawOb: z.string().optional(),
   fltCat: z.string().nullable().optional(),
@@ -102,7 +107,8 @@ export function unavailableAviation(message: Localized, retrievedAt = new Date()
   return {
     status: "unavailable", stationId: null, stationName: null, distanceKm: null,
     observedAt: null, retrievedAt, visibilityM: null, visibilityAtLeast: false, cloudCoverPercent: null,
-    cloudSummary: null, windDirectionDeg: null, windSpeedKmh: null, weather: null,
+    cloudSummary: null, windDirectionDeg: null, windSpeedKmh: null, windGustKmh: null,
+    temperatureC: null, dewPointC: null, pressureHpa: null, weather: null,
     flightCategory: null, rawMetar: null, rawTaf: null, tafValidFrom: null,
     tafValidTo: null, message,
   };
@@ -156,6 +162,10 @@ export async function fetchNearestAviationWeather(observer: Coordinates): Promis
     cloudSummary: metarCloudSummary(clouds, rawOb),
     windDirectionDeg: typeof nearest.report.wdir === "number" ? nearest.report.wdir : null,
     windSpeedKmh: nearest.report.wspd == null ? null : Math.round(nearest.report.wspd * 1.852),
+    windGustKmh: nearest.report.wgst == null ? null : Math.round(nearest.report.wgst * 1.852),
+    temperatureC: nearest.report.temp ?? null,
+    dewPointC: nearest.report.dewp ?? null,
+    pressureHpa: nearest.report.altim ?? null,
     weather: nearest.report.wxString ?? null,
     flightCategory: nearest.report.fltCat ?? null,
     rawMetar: nearest.report.rawOb ?? null,

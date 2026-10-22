@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect */
 
-import { memo, useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowUp,
@@ -30,6 +30,7 @@ import {
   Mountain,
   Radio,
   ShieldAlert,
+  ShieldCheck,
   Snowflake,
   Sun,
   Sunrise,
@@ -44,37 +45,40 @@ import {
 import type { AirQualityConditions, OpportunityResponse, PollenType, SavedLocation, StationHour, WeatherStationResponse } from "@/lib/domain";
 import type { Language, Localized } from "@/lib/i18n";
 import {
+  alertText,
   aqiLevel,
   beaufort,
   capeLevel,
+  cinLevel,
   directionLabel,
+  isSameSite,
   isStormHour,
   liftedIndexLevel,
-  metarReadings,
+  localStormStatus,
   nearestLightning,
   nightOutlook,
   pressureTendency,
+  rainAhead,
+  rainNextHour,
   stormPeriods,
   uvLevel,
   valueNear,
   weatherCodeInfo,
   type Level,
+  type LocalStormStatus,
   type NightOutlook,
   type WeatherIcon,
 } from "@/lib/weather";
-import { moonDay, nextMoonQuarters, nightWindow, sunDay, SYNODIC_MONTH_DAYS, twilightBand, type MoonPhaseName, type NightWindow, type TwilightBand } from "@/lib/sky-calendar";
+import { moonDay, nextMoonQuarters, nextMoonRiseSet, nightWindow, sunDay, SYNODIC_MONTH_DAYS, twilightBand, type MoonPhaseName, type NightWindow, type TwilightBand } from "@/lib/sky-calendar";
 import { sunAltitudeDeg } from "@/lib/astronomy";
-import { athensUtcOffsetMinutes } from "@/lib/time";
+import { athensDayBounds, athensDayDifference, athensNoon } from "@/lib/time";
+import { niceAxis } from "@/lib/chart-axis";
 
 const TIME_ZONE = "Europe/Athens";
 const HOUR_MS = 3_600_000;
-const DAY_MS = 86_400_000;
 // Hours shown in the charts and in the hour strip.
 const CHART_HOURS = 48;
 const STRIP_HOURS = 24;
-// An MTG-LI storm this close (to its edge) is a lightning risk at the site; up to the second, it is near.
-const LIGHTNING_DANGER_KM = 20;
-const LIGHTNING_NEAR_KM = 60;
 
 type Text = ReturnType<typeof makeText>;
 
@@ -85,7 +89,6 @@ function makeText(language: Language) {
   const weekday = new Intl.DateTimeFormat(locale, { timeZone: TIME_ZONE, weekday: "short" });
   const day = new Intl.DateTimeFormat(locale, { timeZone: TIME_ZONE, weekday: "short", day: "numeric", month: "numeric" });
   const date = new Intl.DateTimeFormat(locale, { timeZone: TIME_ZONE, day: "numeric", month: "numeric" });
-  const longDay = new Intl.DateTimeFormat(locale, { timeZone: TIME_ZONE, weekday: "long", day: "numeric", month: "long" });
   const t = (el: string, en: string) => (language === "el" ? el : en);
   return {
     language,
@@ -97,12 +100,14 @@ function makeText(language: Language) {
     weekday: (ms: number) => weekday.format(ms),
     day: (value: Date | string | number) => day.format(new Date(value)),
     date: (value: Date | string | number) => date.format(new Date(value)),
-    longDay: (value: Date | string | number) => longDay.format(new Date(value)),
     duration: (minutes: number) => `${Math.floor(minutes / 60)} ${t("ώ", "h")} ${String(Math.round(minutes % 60)).padStart(2, "0")}′`,
-    inDays: (ms: number) => {
-      const days = Math.round(ms / DAY_MS);
-      if (ms < 20 * HOUR_MS) return t(`σε ${Math.max(1, Math.round(ms / HOUR_MS))} ώ`, `in ${Math.max(1, Math.round(ms / HOUR_MS))} h`);
-      return days === 1 ? t("αύριο", "tomorrow") : t(`σε ${days} ημέρες`, `in ${days} days`);
+    /** Today, tomorrow… by Athens calendar days, as the dates beside it read. */
+    relativeDay: (target: Date | number, now: number) => {
+      const days = athensDayDifference(new Date(now), new Date(target));
+      if (days <= 0) return t("σήμερα", "today");
+      if (days === 1) return t("αύριο", "tomorrow");
+      if (days === 2) return t("μεθαύριο", "in 2 days");
+      return t(`σε ${days} ημέρες`, `in ${days} days`);
     },
   };
 }
@@ -113,6 +118,8 @@ function num(value: number | null | undefined, digits = 0) {
   const fixed = value.toFixed(digits);
   return /^-0(\.0+)?$/.test(fixed) ? fixed.slice(1) : fixed;
 }
+
+const present = (values: Array<number | null>) => values.filter((value): value is number => value != null);
 
 const TONE_LABEL: Record<Level["tone"], Localized> = {
   good: { el: "καλό", en: "good" },
@@ -214,27 +221,19 @@ const BAND_COLOR: Record<TwilightBand, string> = {
   night: "#0f1d30",
 };
 
-interface Axis { min: number; max: number }
+interface Axis { min: number; max: number; step: number }
 
-/** Axis bounds around `values`, with `fixed` ends kept and at least `minSpan` between them. */
-function axisFor(values: number[], fixedMin?: number, fixedMax?: number, minSpan = 1): Axis {
-  let min = fixedMin ?? (values.length ? Math.min(...values) : 0);
-  let max = fixedMax ?? (values.length ? Math.max(...values) : minSpan);
-  if (max - min < minSpan) {
-    if (fixedMin != null) max = min + minSpan;
-    else if (fixedMax != null) min = max - minSpan;
-    else {
-      const middle = (min + max) / 2;
-      min = middle - minSpan / 2;
-      max = middle + minSpan / 2;
-    }
-  }
-  const pad = (max - min) * 0.08;
-  return { min: fixedMin ?? Math.floor(min - pad), max: fixedMax ?? Math.ceil(max + pad) };
-}
+/** An hour on a chart's time axis, formatted once rather than on every redraw. */
+interface TimeLabel { hour: number; weekday: string; clock: string }
+
+const timeLabels = (times: number[], text: Text): TimeLabel[] => times.map((ms) => ({ hour: text.hourOf(ms), weekday: text.weekday(ms), clock: text.clock(ms) }));
 
 const yOf = (value: number, axis: Axis) => Math.min(100, Math.max(0, 100 - ((value - axis.min) / (axis.max - axis.min)) * 100));
-const present = (values: Array<number | null>) => values.filter((value): value is number => value != null);
+
+function ticksFor(axis: Axis, unit: string) {
+  const digits = axis.step >= 1 ? 0 : axis.step >= 0.1 ? 1 : 2;
+  return [axis.max, axis.min + axis.step, axis.min].map((value) => ({ y: yOf(value, axis), label: `${num(value, digits)}${unit}` }));
+}
 
 function linePaths(values: Array<number | null>, axis: Axis) {
   const paths: string[] = [];
@@ -265,28 +264,111 @@ interface ChartSeries {
   barColors?: Array<string | null>;
 }
 
-interface Hover {
-  index: number | null;
-  set: (index: number | null) => void;
+/**
+ * The hour under the pointer, shared by every chart. Only the charts subscribe, so a pointer move
+ * re-renders their legends and cursors and nothing else. Pointer moves faster than the screen
+ * refreshes are folded into one update per frame; keys and resets apply at once.
+ */
+function createHoverStore() {
+  let index: number | null = null;
+  let pending: number | null | undefined;
+  let frame = 0;
+  const listeners = new Set<() => void>();
+  const apply = (next: number | null) => {
+    if (next === index) return;
+    index = next;
+    listeners.forEach((listener) => listener());
+  };
+  return {
+    get: () => index,
+    /** For pointer moves: the latest position wins at the next frame. */
+    follow: (next: number | null) => {
+      pending = next;
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const latest = pending;
+        pending = undefined;
+        if (latest !== undefined) apply(latest);
+      });
+    },
+    set: (next: number | null) => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+      pending = undefined;
+      apply(next);
+    },
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
 }
 
-/** Frame shared by the hourly charts: legend at the hovered hour, day/night shading and the time axis. */
-function ChartFrame({ title, icon: Icon, times, bands, hover, text, legend, leftTicks, rightTicks, height = 112, children, footer }: {
-  title: string; icon: LucideIcon; times: number[]; bands: TwilightBand[]; hover: Hover; text: Text; legend: ReactNode;
-  leftTicks: Array<{ y: number; label: string }>; rightTicks?: Array<{ y: number; label: string }>; height?: number; children: ReactNode; footer?: ReactNode;
+type HoverStore = ReturnType<typeof createHoverStore>;
+
+const useHoverIndex = (hover: HoverStore) => useSyncExternalStore(hover.subscribe, hover.get, hover.get);
+
+type Tick = { y: number; label: string };
+
+/** Consecutive hours in the same daylight band, drawn as one rectangle each. */
+function bandRuns(bands: TwilightBand[]) {
+  const runs: Array<{ band: TwilightBand; start: number; length: number }> = [];
+  bands.forEach((band, index) => {
+    const last = runs.at(-1);
+    if (last && last.band === band) last.length += 1;
+    else runs.push({ band, start: index, length: 1 });
+  });
+  return runs;
+}
+
+// Keys that move a chart's readout, like a slider.
+const STEP_KEYS: Record<string, number> = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1, PageUp: 6, PageDown: -6 };
+
+/**
+ * Frame shared by the hourly charts: legend at the hovered hour, day/night shading, time axis.
+ * The drawing does not depend on the hovered hour, so a pointer move only redraws the legend and
+ * the cursor. The plot works as a slider too: arrow keys move the readout, Escape goes back to now.
+ */
+function ChartFrame({ title, icon: Icon, labels, bands, hover, hovered, text, legend, valueText, leftTicks, rightTicks, height = 112, plot, footer }: {
+  title: string; icon: LucideIcon; labels: TimeLabel[]; bands: TwilightBand[]; hover: HoverStore; hovered: number | null; text: Text; legend: ReactNode; valueText: string;
+  leftTicks: Tick[]; rightTicks?: Tick[]; height?: number; plot: ReactNode; footer?: ReactNode;
 }) {
-  const n = times.length;
-  const index = hover.index != null && hover.index < n ? hover.index : 0;
+  const n = labels.length;
+  const index = hovered != null && hovered < n ? hovered : 0;
+  const svg = useMemo(() => (
+    <svg viewBox={`0 0 ${n} 100`} preserveAspectRatio="none" aria-hidden="true">
+      {bandRuns(bands).map((run) => BAND_FILL[run.band] && <rect key={run.start} x={run.start} y={0} width={run.length} height={100} fill={BAND_FILL[run.band]!} />)}
+      {leftTicks.map((tick) => <line key={`g${tick.y}`} x1={0} x2={n} y1={tick.y} y2={tick.y} className="wx-grid" vectorEffect="non-scaling-stroke" />)}
+      {labels.map((label, i) => label.hour === 0 && <line key={`d${i}`} x1={i + 0.5} x2={i + 0.5} y1={0} y2={100} className="wx-midnight" vectorEffect="non-scaling-stroke" />)}
+      {plot}
+    </svg>
+  ), [n, bands, leftTicks, labels, plot]);
+  const axis = useMemo(() => (
+    <div className={`wx-axis${rightTicks ? " has-right" : ""}`}>
+      {labels.map((label, i) => label.hour % 6 === 0 && (
+        <span key={i} className={label.hour === 0 ? "day" : ""} style={{ left: `${((i + 0.5) / n) * 100}%` }}>{label.hour === 0 ? label.weekday : String(label.hour).padStart(2, "0")}</span>
+      ))}
+    </div>
+  ), [labels, n, rightTicks]);
+  if (!n) return null;
   const select = (event: ReactPointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    hover.set(Math.max(0, Math.min(n - 1, Math.floor(((event.clientX - rect.left) / rect.width) * n))));
+    hover.follow(Math.max(0, Math.min(n - 1, Math.floor(((event.clientX - rect.left) / rect.width) * n))));
   };
-  if (!n) return null;
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") hover.set(null);
+    else if (event.key === "Home") hover.set(0);
+    else if (event.key === "End") hover.set(n - 1);
+    else if (event.key in STEP_KEYS) hover.set(Math.max(0, Math.min(n - 1, (hovered ?? 0) + STEP_KEYS[event.key])));
+    else return;
+    event.preventDefault();
+  };
   return (
     <div className="wx-chart">
       <div className="wx-chart-head">
         <span className="wx-chart-title"><Icon size={14} />{title}</span>
-        <span className="wx-chart-time">{hover.index == null ? text.t("τώρα", "now") : `${text.weekday(times[index])} ${text.clock(times[index])}`}</span>
+        <span className="wx-chart-time">{hovered == null ? text.t("τώρα", "now") : `${labels[index].weekday} ${labels[index].clock}`}</span>
       </div>
       <div className="wx-legend">{legend}</div>
       <div className={`wx-plot-wrap${rightTicks ? " has-right" : ""}`}>
@@ -294,109 +376,109 @@ function ChartFrame({ title, icon: Icon, times, bands, hover, text, legend, left
         <div
           className="wx-plot"
           style={{ height }}
+          role="slider"
+          tabIndex={0}
+          aria-label={title}
+          aria-valuemin={0}
+          aria-valuemax={n - 1}
+          aria-valuenow={index}
+          aria-valuetext={valueText}
           onPointerMove={select}
           onPointerDown={select}
-          onPointerLeave={(event) => { if (event.pointerType === "mouse") hover.set(null); }}
+          onPointerLeave={(event) => { if (event.pointerType === "mouse") hover.follow(null); }}
+          onKeyDown={onKeyDown}
         >
-          <svg viewBox={`0 0 ${n} 100`} preserveAspectRatio="none" aria-hidden="true">
-            {bands.map((band, i) => BAND_FILL[band] && <rect key={i} x={i} y={0} width={1} height={100} fill={BAND_FILL[band]!} />)}
-            {leftTicks.map((tick) => <line key={`g${tick.y}`} x1={0} x2={n} y1={tick.y} y2={tick.y} className="wx-grid" vectorEffect="non-scaling-stroke" />)}
-            {times.map((ms, i) => text.hourOf(ms) === 0 && <line key={`d${i}`} x1={i + 0.5} x2={i + 0.5} y1={0} y2={100} className="wx-midnight" vectorEffect="non-scaling-stroke" />)}
-            {children}
-          </svg>
-          {hover.index != null && <i className="wx-cursor" style={{ left: `${((index + 0.5) / n) * 100}%` }} />}
+          {svg}
+          {hovered != null && <i className="wx-cursor" style={{ left: `${((index + 0.5) / n) * 100}%` }} />}
         </div>
         {rightTicks && <div className="wx-ticks right">{rightTicks.map((tick) => <span key={tick.label + tick.y} style={{ top: `${tick.y}%` }}>{tick.label}</span>)}</div>}
       </div>
-      <div className={`wx-axis${rightTicks ? " has-right" : ""}`}>
-        {times.map((ms, i) => {
-          const hour = text.hourOf(ms);
-          if (hour % 6 !== 0) return null;
-          return <span key={i} className={hour === 0 ? "day" : ""} style={{ left: `${((i + 0.5) / n) * 100}%` }}>{hour === 0 ? text.weekday(ms) : String(hour).padStart(2, "0")}</span>;
-        })}
-      </div>
+      {axis}
       {footer}
     </div>
   );
 }
 
-function ticksFor(axis: Axis, format: (value: number) => string) {
-  const middle = (axis.min + axis.max) / 2;
-  return [axis.max, middle, axis.min].map((value) => ({ y: yOf(value, axis), label: format(value) }));
-}
-
-function TimeChart({ title, icon, times, bands, hover, text, series, left, right, leftUnit, rightUnit, height, footer }: {
-  title: string; icon: LucideIcon; times: number[]; bands: TwilightBand[]; hover: Hover; text: Text; series: ChartSeries[];
+function TimeChart({ title, icon, labels, bands, hover, text, series, left, right, leftUnit, rightUnit, height, footer }: {
+  title: string; icon: LucideIcon; labels: TimeLabel[]; bands: TwilightBand[]; hover: HoverStore; text: Text; series: ChartSeries[];
   left: Axis; right?: Axis; leftUnit: string; rightUnit?: string; height?: number; footer?: ReactNode;
 }) {
-  const index = hover.index != null && hover.index < times.length ? hover.index : 0;
-  const axisOf = (item: ChartSeries) => (item.right && right ? right : left);
+  const hovered = useHoverIndex(hover);
+  const index = hovered != null && hovered < labels.length ? hovered : 0;
+  const leftTicks = useMemo(() => ticksFor(left, leftUnit), [left, leftUnit]);
+  const rightTicks = useMemo(() => (right ? ticksFor(right, rightUnit ?? "") : undefined), [right, rightUnit]);
+  const plot = useMemo(() => series.map((item) => {
+    const axis = item.right && right ? right : left;
+    if (item.kind === "bars") {
+      // One path per colour instead of a rectangle per hour keeps redraws cheap.
+      const paths = new Map<string, string>();
+      item.values.forEach((value, i) => {
+        if (value == null || value <= axis.min) return;
+        const color = item.barColors?.[i] ?? item.color;
+        paths.set(color, `${paths.get(color) ?? ""}M${(i + 0.16).toFixed(2)},100V${yOf(value, axis).toFixed(2)}h0.68V100Z`);
+      });
+      return <g key={item.key}>{[...paths].map(([color, d]) => <path key={color} d={d} fill={color} />)}</g>;
+    }
+    if (item.kind === "area") {
+      return <g key={item.key}>{linePaths(item.values, axis).map((path, i) => {
+        const points = path.slice(1).split("L");
+        const first = points[0].split(",")[0];
+        const last = points.at(-1)!.split(",")[0];
+        return <path key={i} d={`M${first},100 L${points.join(" L")} L${last},100 Z`} fill={item.color} fillOpacity={0.16} stroke="none" />;
+      })}</g>;
+    }
+    return <g key={item.key}>{linePaths(item.values, axis).map((path, i) => (
+      <path key={i} d={path} fill="none" stroke={item.color} strokeWidth={2} strokeDasharray={item.dashed ? "4 3" : undefined} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
+    ))}</g>;
+  }), [series, left, right]);
+  const reading = (item: ChartSeries) => `${num(item.values[index], item.digits ?? 0)}${item.values[index] != null ? item.unit : ""}`;
   const legend = series.map((item) => (
     <span key={item.key}>
       <i className={`wx-swatch ${item.kind}${item.dashed ? " dashed" : ""}`} style={{ "--swatch": item.color } as React.CSSProperties} />
-      {item.label} <strong>{num(item.values[index], item.digits ?? 0)}{item.values[index] != null ? item.unit : ""}</strong>
+      {item.label} <strong>{reading(item)}</strong>
     </span>
   ));
-  const decimals = (axis: Axis) => (axis.max - axis.min < 3 ? 1 : 0);
+  const valueText = `${labels[index]?.weekday ?? ""} ${labels[index]?.clock ?? ""}: ${series.map((item) => `${item.label} ${reading(item)}`).join(", ")}`;
   return (
     <ChartFrame
-      title={title}
-      icon={icon}
-      times={times}
-      bands={bands}
-      hover={hover}
-      text={text}
-      legend={legend}
-      height={height}
-      footer={footer}
-      leftTicks={ticksFor(left, (value) => `${num(value, decimals(left))}${leftUnit}`)}
-      rightTicks={right ? ticksFor(right, (value) => `${num(value, decimals(right))}${rightUnit ?? ""}`) : undefined}
-    >
-      {series.map((item) => {
-        const axis = axisOf(item);
-        if (item.kind === "bars") {
-          return <g key={item.key}>{item.values.map((value, i) => {
-            if (value == null || value <= axis.min) return null;
-            const y = yOf(value, axis);
-            return <rect key={i} x={i + 0.16} width={0.68} y={y} height={100 - y} fill={item.barColors?.[i] ?? item.color} />;
-          })}</g>;
-        }
-        if (item.kind === "area") {
-          return <g key={item.key}>{linePaths(item.values, axis).map((path, i) => {
-            const points = path.slice(1).split("L");
-            const first = points[0].split(",")[0];
-            const last = points.at(-1)!.split(",")[0];
-            return <path key={i} d={`M${first},100 L${points.join(" L")} L${last},100 Z`} fill={item.color} fillOpacity={0.16} stroke="none" />;
-          })}</g>;
-        }
-        return <g key={item.key}>{linePaths(item.values, axis).map((path, i) => (
-          <path key={i} d={path} fill="none" stroke={item.color} strokeWidth={2} strokeDasharray={item.dashed ? "4 3" : undefined} vectorEffect="non-scaling-stroke" strokeLinejoin="round" strokeLinecap="round" />
-        ))}</g>;
-      })}
-    </ChartFrame>
+      title={title} icon={icon} labels={labels} bands={bands} hover={hover} hovered={hovered} text={text} legend={legend} valueText={valueText}
+      height={height} footer={footer} leftTicks={leftTicks} rightTicks={rightTicks} plot={plot}
+    />
   );
 }
 
-/** Cloud per layer (and the median of the forecasts, when the scan has it) as shaded rows. */
-function CloudStrip({ times, bands, hover, text, rows }: { times: number[]; bands: TwilightBand[]; hover: Hover; text: Text; rows: Array<{ label: string; values: Array<number | null> }> }) {
-  const index = hover.index != null && hover.index < times.length ? hover.index : 0;
+/** Cloud per layer (and the median of the forecasts, when the scan has them) as shaded rows. */
+function CloudStrip({ labels, bands, hover, text, rows }: { labels: TimeLabel[]; bands: TwilightBand[]; hover: HoverStore; text: Text; rows: Array<{ label: string; values: Array<number | null> }> }) {
+  const hovered = useHoverIndex(hover);
+  const index = hovered != null && hovered < labels.length ? hovered : 0;
   const rowHeight = 100 / rows.length;
+  const leftTicks = useMemo(() => rows.map((row, i) => ({ y: (i + 0.5) * rowHeight, label: row.label })), [rows, rowHeight]);
+  // Cells grouped by cover in 10 % steps: one path per shade instead of a rectangle per hour.
+  const plot = useMemo(() => {
+    const shades = new Map<number, string>();
+    rows.forEach((row, r) => row.values.forEach((value, i) => {
+      if (value == null || value <= 0) return;
+      const shade = Math.max(1, Math.round(value / 10));
+      shades.set(shade, `${shades.get(shade) ?? ""}M${i},${(r * rowHeight + 1).toFixed(2)}h1.02v${(rowHeight - 2).toFixed(2)}h-1.02Z`);
+    }));
+    return [...shades].map(([shade, d]) => <path key={shade} d={d} fill="#cfe3f2" fillOpacity={Math.min(0.9, shade * 0.09)} />);
+  }, [rows, rowHeight]);
+  const reading = (row: { values: Array<number | null> }) => `${num(row.values[index])}${row.values[index] != null ? "%" : ""}`;
   return (
     <ChartFrame
       title={text.t("Νέφωση ανά στρώμα", "Cloud by layer")}
       icon={Cloud}
-      times={times}
+      labels={labels}
       bands={bands}
       hover={hover}
+      hovered={hovered}
       text={text}
       height={rows.length * 22}
-      legend={rows.map((row) => <span key={row.label}>{row.label} <strong>{num(row.values[index])}{row.values[index] != null ? "%" : ""}</strong></span>)}
-      leftTicks={rows.map((row, i) => ({ y: (i + 0.5) * rowHeight, label: row.label }))}
-    >
-      {rows.map((row, r) => row.values.map((value, i) => value != null && value > 0 && (
-        <rect key={`${r}:${i}`} x={i} y={r * rowHeight + 1} width={1.02} height={rowHeight - 2} fill="#cfe3f2" fillOpacity={Math.min(0.9, (value / 100) * 0.9)} />
-      )))}
-    </ChartFrame>
+      legend={rows.map((row) => <span key={row.label}>{row.label} <strong>{reading(row)}</strong></span>)}
+      valueText={`${labels[index]?.weekday ?? ""} ${labels[index]?.clock ?? ""}: ${rows.map((row) => `${row.label} ${reading(row)}`).join(", ")}`}
+      leftTicks={leftTicks}
+      plot={plot}
+    />
   );
 }
 
@@ -448,31 +530,48 @@ export interface WeatherViewProps {
   observer: SavedLocation;
   /** The opportunity scan: METAR/TAF, MeteoAlarm, MTG-LI and the cloud forecasts come from it. */
   scan: OpportunityResponse | null;
+  /** Why the latest scan failed, if it did. */
+  scanError: Localized | null;
   /** Changes when the scan is refreshed, so this view reloads with it. */
   refreshKey: number | null;
   onMap: () => void;
   onLocations: () => void;
 }
 
-export default function WeatherView({ language, observer, scan, refreshKey, onMap, onLocations }: WeatherViewProps) {
+export default function WeatherView({ language, observer, scan, scanError, refreshKey, onMap, onLocations }: WeatherViewProps) {
   const text = useMemo(() => makeText(language), [language]);
   const { t, pick } = text;
   const now = useClock();
   const { data, loading, error } = useWeatherStation(observer.latitude, observer.longitude, refreshKey);
   const { latitude, longitude } = observer;
+  // The app keeps the last scan while a new site's scan runs (or after it fails); it belongs to
+  // the site it was made for and must not stand in for this one.
+  const siteScan = scan && isSameSite(scan.observer, observer) ? scan : null;
+  const scanNote: Localized = scanError
+    ? { el: `Η σάρωση για αυτή τη θέση απέτυχε (${scanError.el}). Πάτησε «Ανανέωση δεδομένων».`, en: `The scan for this site failed (${scanError.en}). Press “Refresh data”.` }
+    : { el: "Αναμονή για τη σάρωση αυτής της θέσης…", en: "Waiting for this site's scan…" };
 
   const hours = useMemo(() => data?.hours ?? [], [data]);
   const upcoming = useMemo(() => hours.filter((hour) => Date.parse(hour.time) >= now - 30 * 60_000).slice(0, CHART_HOURS), [hours, now]);
-  const strip = useMemo(() => upcoming.slice(0, STRIP_HOURS), [upcoming]);
   const times = useMemo(() => upcoming.map((hour) => Date.parse(hour.time)), [upcoming]);
+  const labels = useMemo(() => timeLabels(times, text), [times, text]);
   const bands = useMemo(() => times.map((ms) => twilightBand(sunAltitudeDeg(new Date(ms), latitude, longitude))), [times, latitude, longitude]);
+  // Rain in the hour that starts at each shown hour (Open-Meteo stamps it at the hour's end).
+  const rain = useMemo(() => {
+    const ahead = rainAhead(hours);
+    const byTime = new Map(hours.map((hour, index) => [hour.time, ahead[index]]));
+    return upcoming.map((hour) => byTime.get(hour.time) ?? { mm: null, chance: null });
+  }, [hours, upcoming]);
+  const strip = useMemo(() => upcoming.slice(0, STRIP_HOURS), [upcoming]);
+  const stripRain = useMemo(() => rain.slice(0, STRIP_HOURS), [rain]);
   // Recomputed with the minute clock, not on every pointer move over the charts.
   const sky = useMemo(() => {
     const date = new Date(now);
     return {
       sun: sunDay(date, latitude, longitude),
-      sunTomorrow: sunDay(new Date(now + DAY_MS), latitude, longitude),
+      sunTomorrow: sunDay(athensNoon(date, 1), latitude, longitude),
       moon: moonDay(date, latitude, longitude),
+      moonNext: nextMoonRiseSet(date, latitude, longitude),
       quarters: nextMoonQuarters(date, 4),
       night: nightWindow(date, latitude, longitude),
     };
@@ -485,12 +584,12 @@ export default function WeatherView({ language, observer, scan, refreshKey, onMa
     const start = Math.max(sky.night.start.getTime(), now - 30 * 60_000);
     return nightOutlook(data.hours, data.airQuality.hours, start, sky.night.end.getTime());
   }, [sky.night, data, now]);
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const hover: Hover = { index: hoverIndex, set: setHoverIndex };
+  const [hover] = useState(createHoverStore);
 
   const updated = data ? text.clock(data.retrievedAt) : null;
   return (
-    <div className="view-stack weather-view">
+    // A tap anywhere but on a chart puts the readouts back to now (touch has no pointer leaving).
+    <div className="view-stack weather-view" onPointerDown={(event) => { if (!(event.target as Element).closest?.(".wx-plot")) hover.set(null); }}>
       <div className="view-heading">
         <div>
           <span className="eyebrow">WEATHER STATION · OPEN-METEO · CAMS · METAR</span>
@@ -505,17 +604,17 @@ export default function WeatherView({ language, observer, scan, refreshKey, onMa
       ) : (
         <div className="weather-grid">
           <NowPanel data={data} observer={observer} now={now} text={text} />
-          <ObservedPanel scan={scan} model={data} now={now} text={text} />
+          <ObservedPanel scan={siteScan} scanNote={scanNote} model={data} now={now} text={text} />
           <section className="panel wx-span-all">
             <PanelHeading eyebrow={t("ΕΠΟΜΕΝΕΣ 48 ΩΡΕΣ", "NEXT 48 HOURS")} title={t("Ωριαία πρόγνωση", "Hourly forecast")} icon={CalendarDays} />
-            <HourStrip hours={strip} text={text} />
-            <HourlyCharts hours={upcoming} times={times} bands={bands} scan={scan} hover={hover} text={text} />
+            <HourStrip hours={strip} rain={stripRain} text={text} />
+            <HourlyCharts hours={upcoming} rain={rain} labels={labels} bands={bands} scan={siteScan} hover={hover} text={text} />
           </section>
-          <DaysPanel data={data} observer={observer} text={text} />
+          <DaysPanel data={data} observer={observer} now={now} text={text} />
           <TonightPanel night={sky.night} outlook={outlook} inProgress={nightInProgress} moon={sky.moon} text={text} />
-          <StormPanel hours={hours} times={times} upcoming={upcoming} bands={bands} scan={scan} observer={observer} now={now} hover={hover} text={text} onMap={onMap} />
+          <StormPanel hours={hours} labels={labels} upcoming={upcoming} bands={bands} scan={siteScan} scanNote={scanNote} observer={observer} now={now} hover={hover} text={text} onMap={onMap} />
           <div className="wx-side">
-            <MoonPanel moon={sky.moon} quarters={sky.quarters} now={now} southern={latitude < 0} text={text} />
+            <MoonPanel moon={sky.moon} next={sky.moonNext} quarters={sky.quarters} now={now} southern={latitude < 0} text={text} />
             <LightPanel observer={observer} text={text} onLocations={onLocations} />
           </div>
           <AirPanel air={air ?? null} now={now} latitude={latitude} longitude={longitude} hover={hover} text={text} />
@@ -542,12 +641,15 @@ const RATE_TEXT = {
   very_rapidly: { el: "πολύ γρήγορα", en: "very rapidly" },
 } as const;
 
+/** The forecast day that is today in Athens; a cached forecast can still start with yesterday. */
+const dayNoon = (day: { date: string }) => new Date(Date.parse(day.date) + 12 * HOUR_MS);
+
 const NowPanel = memo(function NowPanel({ data, observer, now, text }: { data: WeatherStationResponse; observer: SavedLocation; now: number; text: Text }) {
   const { t, pick } = text;
   const current = data.current;
   const hour = data.hours.find((item) => Math.abs(Date.parse(item.time) - now) <= 30 * 60_000) ?? null;
-  const nextHour = data.hours.find((item) => Date.parse(item.time) > now) ?? null;
-  const today = data.days[0] ?? null;
+  const nextRain = rainNextHour(data.hours, now);
+  const today = data.days.find((day) => athensDayDifference(new Date(now), dayNoon(day)) === 0) ?? null;
   const tendency = pressureTendency(data.hours, now);
   const info = weatherCodeInfo(current?.weatherCode ?? null);
   const uv = uvLevel(current?.uvIndex ?? null);
@@ -576,7 +678,7 @@ const NowPanel = memo(function NowPanel({ data, observer, now, text }: { data: W
           tone={(current?.windGustsKmh ?? 0) >= 40 ? "warn" : null} />
         <Stat icon={Cloud} label={t("Νέφωση", "Cloud")} value={`${num(current?.cloudCover)}%`} hint={hour ? `${t("χαμ.", "low")} ${num(hour.cloudCoverLow)} · ${t("μεσ.", "mid")} ${num(hour.cloudCoverMid)} · ${t("υψ.", "high")} ${num(hour.cloudCoverHigh)}%` : undefined} />
         <Stat icon={Eye} label={t("Ορατότητα", "Visibility")} value={current?.visibilityM != null ? `${num(current.visibilityM / 1000, current.visibilityM < 10_000 ? 1 : 0)} km` : "—"} hint={t("μοντέλο· δες και το METAR", "model; see the METAR too")} tone={current?.visibilityM != null && current.visibilityM < 5_000 ? "warn" : null} />
-        <Stat icon={Umbrella} label={t("Βροχή επόμενη ώρα", "Rain next hour")} value={`${num(nextHour?.precipitationMm, 1)} mm`} hint={`${t("πιθανότητα", "chance")} ${num(nextHour?.precipitationProbability)}% · ${t("σήμερα", "today")} ${num(today?.precipitationMm, 1)} mm`} />
+        <Stat icon={Umbrella} label={t("Βροχή επόμενη ώρα", "Rain next hour")} value={`${num(nextRain?.mm, 1)} mm`} hint={`${t("πιθανότητα", "chance")} ${num(nextRain?.chance)}% · ${t("σήμερα", "today")} ${num(today?.precipitationMm, 1)} mm`} />
         <Stat icon={Sun} label={t("Δείκτης UV", "UV index")} value={num(current?.uvIndex, 1)} hint={uv ? `${pick(uv.text)} · ${t("μέγιστος σήμερα", "max today")} ${num(today?.uvIndexMax, 1)}` : undefined} tone={uv && uv.level >= 2 ? uv.tone : null} />
         <Stat icon={Snowflake} label={t("Ισόθερμη 0 °C", "Freezing level")} value={hour?.freezingLevelM != null ? `${Math.round(hour.freezingLevelM).toLocaleString(text.locale)} m` : "—"} hint={t("ύψος όπου η θερμοκρασία πέφτει στους 0 °C", "height where the air reaches 0 °C")} />
       </div>
@@ -595,27 +697,30 @@ const FLIGHT_CATEGORY: Record<string, Localized> = {
   LIFR: { el: "LIFR · πολύ χαμηλή", en: "LIFR · very low" },
 };
 
-const ObservedPanel = memo(function ObservedPanel({ scan, model, now, text }: { scan: OpportunityResponse | null; model: WeatherStationResponse; now: number; text: Text }) {
+const ObservedPanel = memo(function ObservedPanel({ scan, scanNote, model, now, text }: { scan: OpportunityResponse | null; scanNote: Localized; model: WeatherStationResponse; now: number; text: Text }) {
   const { t, pick } = text;
   const aviation = scan?.aviation;
-  const readings = metarReadings(aviation?.rawMetar ?? null);
   const ageMinutes = aviation?.observedAt ? Math.max(0, Math.round((now - Date.parse(aviation.observedAt)) / 60_000)) : null;
+  const calm = aviation?.windSpeedKmh === 0;
+  const windHint = aviation && !calm
+    ? `${aviation.windDirectionDeg != null ? directionLabel(aviation.windDirectionDeg, text.language) : t("μεταβλητός", "variable")}${aviation.windGustKmh != null ? ` · ${t("ριπές", "gusts")} ${aviation.windGustKmh} km/h` : ""}`
+    : undefined;
   return (
     <section className="panel wx-observed">
       <PanelHeading eyebrow={t("ΠΡΑΓΜΑΤΙΚΗ ΜΕΤΡΗΣΗ · METAR", "OBSERVED · METAR")} title={t("Πλησιέστερο αεροδρόμιο", "Nearest airport")} icon={Radio} aside={aviation && <span className={`status-dot status-${aviation.status}`} aria-hidden="true" />} />
       {!aviation ? (
-        <p className="wx-muted">{t("Αναμονή για τη σάρωση…", "Waiting for the scan…")}</p>
+        <p className="wx-muted">{pick(scanNote)}</p>
       ) : !aviation.stationId ? (
         <p className="wx-muted">{pick(aviation.message)}</p>
       ) : (
         <>
           <p className="wx-station"><strong>{aviation.stationId}</strong>{aviation.stationName && ` · ${aviation.stationName}`} · {aviation.distanceKm} km{ageMinutes != null && ` · ${t(`πριν ${ageMinutes}′`, `${ageMinutes}′ ago`)}`}</p>
           <div className="wx-stats compact">
-            <Stat icon={Thermometer} label={t("Θερμοκρασία", "Temperature")} value={readings.temperatureC != null ? `${readings.temperatureC}°` : "—"} hint={`${t("μοντέλο", "model")} ${num(model.current?.temperatureC, 1)}°${readings.dewPointC != null ? ` · ${t("δρόσος", "dew")} ${readings.dewPointC}°` : ""}`} />
-            <Stat icon={Gauge} label="QNH" value={readings.pressureHpa != null ? `${num(readings.pressureHpa, readings.pressureHpa % 1 ? 1 : 0)} hPa` : "—"} hint={`${t("μοντέλο", "model")} ${num(model.current?.pressureHpa, 1)} hPa`} />
+            <Stat icon={Thermometer} label={t("Θερμοκρασία", "Temperature")} value={aviation.temperatureC != null ? `${num(aviation.temperatureC)}°` : "—"} hint={`${t("μοντέλο", "model")} ${num(model.current?.temperatureC, 1)}°${aviation.dewPointC != null ? ` · ${t("δρόσος", "dew")} ${num(aviation.dewPointC)}°` : ""}`} />
+            <Stat icon={Gauge} label="QNH" value={aviation.pressureHpa != null ? `${num(aviation.pressureHpa, aviation.pressureHpa % 1 ? 1 : 0)} hPa` : "—"} hint={`${t("μοντέλο", "model")} ${num(model.current?.pressureHpa, 1)} hPa`} />
             <Stat icon={Wind} label={t("Άνεμος", "Wind")}
-              value={aviation.windSpeedKmh == null ? "—" : aviation.windSpeedKmh === 0 ? t("Άπνοια", "Calm") : <>{aviation.windSpeedKmh} km/h <WindArrow from={aviation.windDirectionDeg} /></>}
-              hint={aviation.windSpeedKmh === 0 ? undefined : aviation.windDirectionDeg != null ? directionLabel(aviation.windDirectionDeg, text.language) : t("μεταβλητός", "variable")} />
+              value={aviation.windSpeedKmh == null ? "—" : calm ? t("Άπνοια", "Calm") : <>{aviation.windSpeedKmh} km/h <WindArrow from={aviation.windDirectionDeg} /></>}
+              hint={windHint} tone={(aviation.windGustKmh ?? 0) >= 40 ? "warn" : null} />
             <Stat icon={Eye} label={t("Ορατότητα", "Visibility")} value={aviation.visibilityM != null ? `${aviation.visibilityAtLeast ? "≥" : ""}${num(aviation.visibilityM / 1000, aviation.visibilityM >= 10_000 ? 0 : 1)} km` : "—"} hint={aviation.flightCategory ? pick(FLIGHT_CATEGORY[aviation.flightCategory] ?? { el: aviation.flightCategory, en: aviation.flightCategory }) : undefined} />
           </div>
           <p className="wx-sky-line"><Cloud size={14} />{aviation.cloudSummary ? pick(aviation.cloudSummary) : t("Χωρίς αναφορά νέφωσης", "No cloud report")}{aviation.weather && ` · ${aviation.weather}`}</p>
@@ -628,16 +733,16 @@ const ObservedPanel = memo(function ObservedPanel({ scan, model, now, text }: { 
   );
 });
 
-const HourStrip = memo(function HourStrip({ hours, text }: { hours: StationHour[]; text: Text }) {
+const HourStrip = memo(function HourStrip({ hours, rain, text }: { hours: StationHour[]; rain: Array<{ mm: number | null; chance: number | null }>; text: Text }) {
   const { t } = text;
   return (
     <div className="wx-hour-strip" role="list" aria-label={t("Επόμενες 24 ώρες", "Next 24 hours")}>
-      {hours.map((hour) => (
+      {hours.map((hour, index) => (
         <div key={hour.time} role="listitem" className={`wx-hour${hour.isDay === false ? " night" : ""}${isStormHour(hour) ? " storm" : ""}`}>
           <span>{text.clock(hour.time)}</span>
           <WeatherGlyph code={hour.weatherCode} isDay={hour.isDay} size={22} />
           <strong>{num(hour.temperatureC)}°</strong>
-          <small className="wx-rain"><Umbrella size={11} />{num(hour.precipitationProbability)}%</small>
+          <small className="wx-rain" title={t("Πιθανότητα βροχής την ώρα που ξεκινά", "Chance of rain in the hour that starts")}><Umbrella size={11} />{num(rain[index]?.chance)}%</small>
           <small><WindArrow from={hour.windDirectionDeg} size={11} />{num(hour.windSpeedKmh)}</small>
           <small className="wx-cloud-cell"><Cloud size={11} />{num(hour.cloudCover)}%</small>
         </div>
@@ -646,66 +751,93 @@ const HourStrip = memo(function HourStrip({ hours, text }: { hours: StationHour[
   );
 });
 
-function HourlyCharts({ hours, times, bands, scan, hover, text }: { hours: StationHour[]; times: number[]; bands: TwilightBand[]; scan: OpportunityResponse | null; hover: Hover; text: Text }) {
-  const { t } = text;
-  const column = <K extends keyof StationHour>(key: K) => hours.map((hour) => hour[key] as number | null);
-  const temperature = column("temperatureC");
-  const dewPoint = column("dewPointC");
-  const apparent = column("apparentTemperatureC");
-  const rain = column("precipitationMm");
-  const chance = column("precipitationProbability");
-  const wind = column("windSpeedKmh");
-  const gusts = column("windGustsKmh");
-  const pressure = column("pressureHpa");
-  const visibility = hours.map((hour) => (hour.visibilityM == null ? null : hour.visibilityM / 1000));
-  // The scan's median of up to three cloud forecasts, matched by hour.
-  const consensusByTime = new Map((scan?.observerForecast ?? []).map((hour) => [Date.parse(hour.time), hour.cloudConsensus ?? null]));
-  const consensus = times.map((ms) => consensusByTime.get(ms) ?? null);
-  const sourceCount = (scan?.observerForecast ?? []).some((hour) => hour.cloudSources && Object.values(hour.cloudSources).filter((value) => value != null).length >= 2);
-  const shared = { times, bands, hover, text };
-  return (
-    <div className="wx-charts">
-      <TimeChart {...shared} title={t("Θερμοκρασία", "Temperature")} icon={Thermometer} leftUnit="°" left={axisFor(present([...temperature, ...dewPoint, ...apparent]), undefined, undefined, 6)}
-        series={[
+function HourlyCharts({ hours, rain, labels, bands, scan, hover, text }: {
+  hours: StationHour[]; rain: Array<{ mm: number | null; chance: number | null }>; labels: TimeLabel[]; bands: TwilightBand[]; scan: OpportunityResponse | null; hover: HoverStore; text: Text;
+}) {
+  // Built once per data change; a pointer move re-renders only legends and cursors.
+  const charts = useMemo(() => {
+    const { t } = text;
+    const column = <K extends keyof StationHour>(key: K) => hours.map((hour) => hour[key] as number | null);
+    const temperature = column("temperatureC");
+    const dewPoint = column("dewPointC");
+    const apparent = column("apparentTemperatureC");
+    const rainMm = rain.map((value) => value.mm);
+    const chance = rain.map((value) => value.chance);
+    const wind = column("windSpeedKmh");
+    const gusts = column("windGustsKmh");
+    const pressure = column("pressureHpa");
+    const visibility = hours.map((hour) => (hour.visibilityM == null ? null : hour.visibilityM / 1000));
+    // The scan's median of the cloud forecasts, matched by hour, and how many forecasts it has.
+    const forecast = scan?.observerForecast ?? [];
+    const consensusByTime = new Map(forecast.map((hour) => [Date.parse(hour.time), hour.cloudConsensus ?? null]));
+    const sources = Math.max(0, ...forecast.map((hour) => (hour.cloudSources ? Object.values(hour.cloudSources).filter((value) => value != null).length : 0)));
+    return {
+      temperature: {
+        left: niceAxis(present([...temperature, ...dewPoint, ...apparent]), { minSpan: 6 }),
+        series: [
           { key: "t", label: t("Θερμοκρασία", "Temperature"), values: temperature, color: "#ffa25e", kind: "line", unit: "°", digits: 1 },
           { key: "a", label: t("Αισθητή", "Feels like"), values: apparent, color: "#c7a6ff", kind: "line", unit: "°", digits: 1, dashed: true },
           { key: "d", label: t("Σημείο δρόσου", "Dew point"), values: dewPoint, color: "#6db8e8", kind: "line", unit: "°", digits: 1 },
-        ]}
-        footer={<p className="wx-chart-note">{t("Όπου η θερμοκρασία πλησιάζει το σημείο δρόσου (κάτω από ~2 °C), ο φακός θολώνει από υγρασία.", "Where the temperature nears the dew point (within ~2 °C), dew forms on the lens.")}</p>}
-      />
-      <TimeChart {...shared} title={t("Βροχή", "Rain")} icon={Umbrella} leftUnit=" mm" rightUnit="%" left={axisFor(present(rain), 0, undefined, 1)} right={{ min: 0, max: 100 }}
-        series={[
+        ] as ChartSeries[],
+      },
+      rain: {
+        left: niceAxis(present(rainMm), { min: 0, minSpan: 1 }),
+        right: { min: 0, max: 100, step: 50 },
+        series: [
           { key: "p", label: t("Πιθανότητα", "Chance"), values: chance, color: "#6db8e8", kind: "area", unit: "%", right: true },
-          { key: "r", label: t("Ύψος", "Amount"), values: rain, color: "#5aa9ff", kind: "bars", unit: " mm", digits: 1 },
-        ]}
-      />
-      <TimeChart {...shared} title={t("Άνεμος", "Wind")} icon={Wind} leftUnit="" left={axisFor(present([...wind, ...gusts]), 0, undefined, 20)}
-        series={[
+          { key: "r", label: t("Ύψος", "Amount"), values: rainMm, color: "#5aa9ff", kind: "bars", unit: " mm", digits: 1 },
+        ] as ChartSeries[],
+      },
+      wind: {
+        left: niceAxis(present([...wind, ...gusts]), { min: 0, minSpan: 20 }),
+        series: [
           { key: "w", label: t("Μέση ταχύτητα", "Speed"), values: wind, color: "#7de4ca", kind: "line", unit: " km/h" },
           { key: "g", label: t("Ριπές", "Gusts"), values: gusts, color: "#e5ad55", kind: "line", unit: " km/h", dashed: true },
-        ]}
-        footer={<div className="wx-arrow-row">{hours.map((hour, i) => i % 3 === 0 && <span key={hour.time} style={{ left: `${((i + 0.5) / hours.length) * 100}%` }}><WindArrow from={hour.windDirectionDeg} size={12} /></span>)}</div>}
-      />
-      <CloudStrip {...shared} rows={[
+        ] as ChartSeries[],
+        arrows: <div className="wx-arrow-row">{hours.map((hour, i) => i % 3 === 0 && <span key={hour.time} style={{ left: `${((i + 0.5) / hours.length) * 100}%` }}><WindArrow from={hour.windDirectionDeg} size={12} /></span>)}</div>,
+      },
+      cloudRows: [
         { label: t("Υψηλά", "High"), values: column("cloudCoverHigh") },
         { label: t("Μέσα", "Mid"), values: column("cloudCoverMid") },
         { label: t("Χαμηλά", "Low"), values: column("cloudCoverLow") },
-        ...(sourceCount ? [{ label: t("3 πηγές", "3 sources"), values: consensus }] : []),
-      ]} />
-      <TimeChart {...shared} title={t("Ατμοσφαιρική πίεση", "Pressure")} icon={Gauge} leftUnit="" left={axisFor(present(pressure), undefined, undefined, 6)}
-        series={[{ key: "p", label: t("Πίεση θάλασσας", "Sea-level pressure"), values: pressure, color: "#c7a6ff", kind: "line", unit: " hPa", digits: 1 }]}
+        ...(sources >= 2 ? [{ label: t(`${sources} πηγές`, `${sources} sources`), values: hours.map((hour) => consensusByTime.get(Date.parse(hour.time)) ?? null) }] : []),
+      ],
+      pressure: {
+        left: niceAxis(present(pressure), { minSpan: 6 }),
+        series: [{ key: "p", label: t("Πίεση θάλασσας", "Sea-level pressure"), values: pressure, color: "#c7a6ff", kind: "line", unit: " hPa", digits: 1 }] as ChartSeries[],
+      },
+      visibility: {
+        left: niceAxis(present(visibility), { min: 0, minSpan: 10 }),
+        series: [{ key: "v", label: t("Ορατότητα", "Visibility"), values: visibility, color: "#9fd6ff", kind: "line", unit: " km", digits: 1 }] as ChartSeries[],
+      },
+    };
+  }, [hours, rain, scan, text]);
+  const { t } = text;
+  const shared = { labels, bands, hover, text };
+  return (
+    <div className="wx-charts">
+      <TimeChart {...shared} title={t("Θερμοκρασία", "Temperature")} icon={Thermometer} leftUnit="°" left={charts.temperature.left} series={charts.temperature.series}
+        footer={<p className="wx-chart-note">{t("Όπου η θερμοκρασία πλησιάζει το σημείο δρόσου (κάτω από ~2 °C), ο φακός θολώνει από υγρασία.", "Where the temperature nears the dew point (within ~2 °C), dew forms on the lens.")}</p>}
       />
-      <TimeChart {...shared} title={t("Ορατότητα", "Visibility")} icon={Eye} leftUnit=" km" left={axisFor(present(visibility), 0, undefined, 10)}
-        series={[{ key: "v", label: t("Ορατότητα", "Visibility"), values: visibility, color: "#9fd6ff", kind: "line", unit: " km", digits: 1 }]}
+      <TimeChart {...shared} title={t("Βροχή", "Rain")} icon={Umbrella} leftUnit=" mm" rightUnit="%" left={charts.rain.left} right={charts.rain.right} series={charts.rain.series}
+        footer={<p className="wx-chart-note">{t("Κάθε ώρα δείχνει τη βροχή της ώρας που ξεκινά τότε.", "Each hour shows the rain in the hour that starts then.")}</p>}
       />
+      <TimeChart {...shared} title={t("Άνεμος", "Wind")} icon={Wind} leftUnit="" left={charts.wind.left} series={charts.wind.series} footer={charts.wind.arrows} />
+      <CloudStrip {...shared} rows={charts.cloudRows} />
+      <TimeChart {...shared} title={t("Ατμοσφαιρική πίεση", "Pressure")} icon={Gauge} leftUnit="" left={charts.pressure.left} series={charts.pressure.series} />
+      <TimeChart {...shared} title={t("Ορατότητα", "Visibility")} icon={Eye} leftUnit=" km" left={charts.visibility.left} series={charts.visibility.series} />
     </div>
   );
 }
 
-const DaysPanel = memo(function DaysPanel({ data, observer, text }: { data: WeatherStationResponse; observer: SavedLocation; text: Text }) {
+const DaysPanel = memo(function DaysPanel({ data, observer, now, text }: { data: WeatherStationResponse; observer: SavedLocation; now: number; text: Text }) {
   const { t, pick } = text;
-  const lows = present(data.days.map((day) => day.temperatureMinC));
-  const highs = present(data.days.map((day) => day.temperatureMaxC));
+  // Days are labelled by the calendar: a forecast fetched before midnight still starts with yesterday.
+  const days = data.days
+    .map((day) => ({ day, noon: dayNoon(day), offset: athensDayDifference(new Date(now), dayNoon(day)) }))
+    .filter((entry) => entry.offset >= 0);
+  const lows = present(days.map(({ day }) => day.temperatureMinC));
+  const highs = present(days.map(({ day }) => day.temperatureMaxC));
   const floor = lows.length ? Math.min(...lows) : 0;
   const ceiling = highs.length ? Math.max(...highs) : 1;
   const span = Math.max(1, ceiling - floor);
@@ -713,9 +845,7 @@ const DaysPanel = memo(function DaysPanel({ data, observer, text }: { data: Weat
     <section className="panel wx-span-2">
       <PanelHeading eyebrow={t("7 ΗΜΕΡΕΣ", "7 DAYS")} title={t("Πρόγνωση εβδομάδας", "Week ahead")} icon={CalendarDays} />
       <div className="wx-days">
-        {data.days.map((day, index) => {
-          // Noon of that day (Athens) for the Sun and Moon of the day.
-          const noon = new Date(Date.parse(day.date) + 12 * HOUR_MS);
+        {days.map(({ day, noon, offset }) => {
           const sun = sunDay(noon, observer.latitude, observer.longitude);
           const moon = moonDay(noon, observer.latitude, observer.longitude);
           const info = weatherCodeInfo(day.weatherCode);
@@ -724,7 +854,7 @@ const DaysPanel = memo(function DaysPanel({ data, observer, text }: { data: Weat
           const high = day.temperatureMaxC;
           return (
             <div key={day.date} className="wx-day">
-              <span className="wx-day-name"><strong>{index === 0 ? t("Σήμερα", "Today") : index === 1 ? t("Αύριο", "Tomorrow") : text.weekday(noon.getTime())}</strong><small>{index < 2 ? text.day(noon) : text.date(noon)}</small></span>
+              <span className="wx-day-name"><strong>{offset === 0 ? t("Σήμερα", "Today") : offset === 1 ? t("Αύριο", "Tomorrow") : text.weekday(noon.getTime())}</strong><small>{offset < 2 ? text.day(noon) : text.date(noon)}</small></span>
               <span className="wx-day-glyph" title={info ? pick(info.text) : undefined}><WeatherGlyph code={day.weatherCode} isDay size={26} /><small>{info ? pick(info.text) : "—"}</small></span>
               <span className="wx-day-temps">
                 <small>{num(low)}°</small>
@@ -756,7 +886,7 @@ function OutlookRow({ icon: Icon, label, tone, value, advice, text }: { icon: Lu
 const TonightPanel = memo(function TonightPanel({ night, outlook, inProgress, moon, text }: { night: NightWindow | null; outlook: NightOutlook | null; inProgress: boolean; moon: ReturnType<typeof moonDay>; text: Text }) {
   const { t } = text;
   if (!night || !outlook) {
-    return <section className="panel"><PanelHeading eyebrow={t("ΑΠΟΨΕ", "TONIGHT")} title={t("Απόψε για φωτογράφιση", "Tonight for photography")} icon={Telescope} /><p className="wx-muted">{t("Δεν υπάρχει νύχτα στο διάστημα της πρόγνωσης.", "No night falls within the forecast.")}</p></section>;
+    return <section className="panel wx-tonight"><PanelHeading eyebrow={t("ΑΠΟΨΕ", "TONIGHT")} title={t("Απόψε για φωτογράφιση", "Tonight for photography")} icon={Telescope} /><p className="wx-muted">{t("Δεν υπάρχει νύχτα στο διάστημα της πρόγνωσης.", "No night falls within the forecast.")}</p></section>;
   }
   const o = outlook;
   const advice = {
@@ -786,29 +916,41 @@ const TonightPanel = memo(function TonightPanel({ night, outlook, inProgress, mo
   );
 });
 
+/** Today's Sun by band, from Athens midnight to midnight: 23 or 25 hours when the clocks change. */
 function TwilightBar({ now, text, latitude, longitude }: { now: number; text: Text; latitude: number; longitude: number }) {
   const { t } = text;
-  const offsetMs = athensUtcOffsetMinutes(new Date(now)) * 60_000;
-  const midnight = Math.floor((now + offsetMs) / DAY_MS) * DAY_MS - offsetMs;
+  const { start, end } = athensDayBounds(new Date(now));
+  const length = end.getTime() - start.getTime();
+  const at = (ms: number) => ((ms - start.getTime()) / length) * 100;
   const step = 10 * 60_000;
+  const samples = Math.round(length / step);
   const stops: string[] = [];
   let previous: TwilightBand | null = null;
-  let start = 0;
-  const samples = DAY_MS / step;
+  let first = 0;
   for (let i = 0; i <= samples; i += 1) {
-    const band = i < samples ? twilightBand(sunAltitudeDeg(new Date(midnight + i * step + step / 2), latitude, longitude)) : null;
+    const band = i < samples ? twilightBand(sunAltitudeDeg(new Date(start.getTime() + i * step + step / 2), latitude, longitude)) : null;
     if (band !== previous) {
-      if (previous) stops.push(`${BAND_COLOR[previous]} ${((start / samples) * 100).toFixed(2)}% ${((i / samples) * 100).toFixed(2)}%`);
+      if (previous) stops.push(`${BAND_COLOR[previous]} ${((first / samples) * 100).toFixed(2)}% ${((i / samples) * 100).toFixed(2)}%`);
       previous = band;
-      start = i;
+      first = i;
     }
   }
+  // 06, 12 and 18 o'clock local time; on a day the clocks change, they sit an hour off the six-hour marks.
+  const marks = [6, 12, 18].map((hour) => {
+    const guess = start.getTime() + hour * HOUR_MS;
+    const ms = [guess, guess - HOUR_MS, guess + HOUR_MS].find((candidate) => text.hourOf(candidate) === hour) ?? guess;
+    return { hour, left: at(ms) };
+  });
   return (
     <div className="wx-twilight">
       <div className="wx-twilight-bar" style={{ background: `linear-gradient(to right, ${stops.join(", ")})` }} role="img" aria-label={t("Ήλιος και λυκόφωτα σήμερα", "Sun and twilight today")}>
-        <i style={{ left: `${((now - midnight) / DAY_MS) * 100}%` }} title={t("τώρα", "now")} />
+        <i style={{ left: `${at(now)}%` }} title={t("τώρα", "now")} />
       </div>
-      <div className="wx-twilight-scale"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+      <div className="wx-twilight-scale">
+        <span style={{ left: "0%" }}>00</span>
+        {marks.map((mark) => <span key={mark.hour} style={{ left: `${mark.left}%` }}>{String(mark.hour).padStart(2, "0")}</span>)}
+        <span style={{ left: "100%" }}>24</span>
+      </div>
       <div className="wx-twilight-key">
         {(["day", "civil", "nautical", "astronomical", "night"] as TwilightBand[]).map((band) => (
           <span key={band}><i style={{ background: BAND_COLOR[band] }} />{{
@@ -845,8 +987,11 @@ const SunPanel = memo(function SunPanel({ sun, tomorrow, now, text, latitude, lo
   );
 });
 
-const MoonPanel = memo(function MoonPanel({ moon, quarters, now, southern, text }: { moon: ReturnType<typeof moonDay>; quarters: ReturnType<typeof nextMoonQuarters>; now: number; southern: boolean; text: Text }) {
+const MoonPanel = memo(function MoonPanel({ moon, next, quarters, now, southern, text }: {
+  moon: ReturnType<typeof moonDay>; next: ReturnType<typeof nextMoonRiseSet>; quarters: ReturnType<typeof nextMoonQuarters>; now: number; southern: boolean; text: Text;
+}) {
   const { t, pick } = text;
+  const when = (event: Date | null) => (event ? `${text.relativeDay(event, now)} ${text.clock(event)}` : "—");
   return (
     <section className="panel wx-moon-panel">
       <PanelHeading eyebrow={t("ΣΕΛΗΝΗ", "MOON")} title={t("Φάση και ορατότητα", "Phase and visibility")} icon={MoonStar} />
@@ -856,7 +1001,7 @@ const MoonPanel = memo(function MoonPanel({ moon, quarters, now, southern, text 
           <strong>{pick(MOON_PHASE_TEXT[moon.name])}</strong>
           <span>{t("Φωτισμός", "Illuminated")} {Math.round(moon.fraction * 100)}% · {t("ηλικία", "age")} {num(moon.ageDays, 1)} / {num(SYNODIC_MONTH_DAYS, 1)} {t("ημ.", "d")}</span>
           <span>{moon.altitudeDeg > 0 ? t(`Πάνω από τον ορίζοντα, ${num(moon.altitudeDeg)}° ύψος προς ${directionLabel(moon.azimuthDeg, "el")}`, `Above the horizon, ${num(moon.altitudeDeg)}° high to the ${directionLabel(moon.azimuthDeg, "en")}`) : t("Κάτω από τον ορίζοντα", "Below the horizon")}</span>
-          <span className="wx-moon-times"><Moon size={13} />{t("Ανατολή", "Rise")} <strong>{moon.alwaysUp ? t("όλη μέρα πάνω", "up all day") : moon.rise ? text.clock(moon.rise) : "—"}</strong> · {t("Δύση", "Set")} <strong>{moon.alwaysDown ? t("όλη μέρα κάτω", "down all day") : moon.set ? text.clock(moon.set) : "—"}</strong></span>
+          <span className="wx-moon-times"><Moon size={13} />{t("Ανατέλλει", "Rises")} <strong>{when(next.rise)}</strong> · {t("Δύει", "Sets")} <strong>{when(next.set)}</strong></span>
           <small>{t("Απόσταση", "Distance")} {Math.round(moon.distanceKm).toLocaleString(text.locale)} km</small>
         </div>
       </div>
@@ -868,7 +1013,7 @@ const MoonPanel = memo(function MoonPanel({ moon, quarters, now, southern, text 
               <MoonGlyph fraction={fraction} waxing={waxing} size={28} southern={southern} />
               <span>{pick(MOON_PHASE_TEXT[quarter.quarter])}</span>
               <strong>{text.day(quarter.at)} {text.clock(quarter.at)}</strong>
-              <small>{text.inDays(quarter.at.getTime() - now)}</small>
+              <small>{text.relativeDay(quarter.at, now)}</small>
             </div>
           );
         })}
@@ -878,70 +1023,102 @@ const MoonPanel = memo(function MoonPanel({ moon, quarters, now, southern, text 
   );
 });
 
-function StormPanel({ hours, times, upcoming, bands, scan, observer, now, hover, text, onMap }: {
-  hours: StationHour[]; times: number[]; upcoming: StationHour[]; bands: TwilightBand[]; scan: OpportunityResponse | null; observer: SavedLocation; now: number; hover: Hover; text: Text; onMap: () => void;
+const STATUS_TONE: Record<LocalStormStatus, Level["tone"]> = {
+  lightning_close: "bad",
+  lightning_near: "warn",
+  thunder: "warn",
+  rain_unstable: "fair",
+  unstable: "fair",
+  quiet: "good",
+};
+
+function StormPanel({ hours, labels, upcoming, bands, scan, scanNote, observer, now, hover, text, onMap }: {
+  hours: StationHour[]; labels: TimeLabel[]; upcoming: StationHour[]; bands: TwilightBand[]; scan: OpportunityResponse | null; scanNote: Localized;
+  observer: SavedLocation; now: number; hover: HoverStore; text: Text; onMap: () => void;
 }) {
   const { t, pick } = text;
-  const periods = stormPeriods(hours, now);
-  const stormHours = upcoming.filter(isStormHour).length;
-  const lightning = scan?.lightning?.status === "available" ? nearestLightning(observer, scan.lightning.clusters) : null;
+  const periods = useMemo(() => stormPeriods(hours, now), [hours, now]);
+  const lightning = useMemo(() => (scan?.lightning?.status === "available" ? nearestLightning(observer, scan.lightning.clusters) : null), [scan, observer]);
   const day = upcoming.filter((hour) => Date.parse(hour.time) <= now + 24 * HOUR_MS);
-  const capeMax = Math.max(...present(day.map((hour) => hour.capeJkg)), 0);
-  const liftedMin = present(day.map((hour) => hour.liftedIndex));
-  const liMin = liftedMin.length ? Math.min(...liftedMin) : null;
+  const capes = present(day.map((hour) => hour.capeJkg));
+  const capeMax = capes.length ? Math.max(...capes) : null;
+  const lifted = present(day.map((hour) => hour.liftedIndex));
+  const liMin = lifted.length ? Math.min(...lifted) : null;
   const cin = valueNear(hours, now, (hour) => hour.convectiveInhibitionJkg);
   const cape = capeLevel(capeMax);
   const li = liftedIndexLevel(liMin);
-  const alerts = [...(scan?.weatherAlerts.alerts ?? [])].sort((a, b) => (a.distanceKm ?? Number.POSITIVE_INFINITY) - (b.distanceKm ?? Number.POSITIVE_INFINITY));
-  const near = lightning && lightning.distanceKm <= LIGHTNING_NEAR_KM ? lightning : null;
-  const status: { tone: Level["tone"]; title: string; detail: string } = near
-    ? {
-      tone: near.distanceKm <= LIGHTNING_DANGER_KM ? "bad" : "warn",
-      title: near.distanceKm === 0
+  const cinText = cinLevel(cin);
+  const stormHours = upcoming.filter(isStormHour).length;
+  const status = localStormStatus({ periods, lightningKm: lightning?.distanceKm ?? null, capeMax, liftedMin: liMin });
+  // The frame time, not the scan's age, so the minutes keep counting between scans.
+  const ageMinutes = lightning ? Math.max(0, Math.round((now - Date.parse(lightning.cluster.observedAt)) / 60_000)) : 0;
+  const lightningDetail = lightning ? t(
+    `Ο δορυφόρος MTG-LI κατέγραψε κεραυνούς πριν από ${ageMinutes}′ σε καταιγίδα με κέντρο ${Math.round(lightning.centerKm)} km ${directionLabel(lightning.bearingDeg, "el")} και έκταση ~${lightning.cluster.radiusKm} km γύρω του${lightning.distanceKm === 0 ? ": η θέση σου είναι μέσα στην περιοχή της" : ""}. Η θέση των κεραυνών έχει αβεβαιότητα ~10–15 km.`,
+    `MTG-LI recorded lightning ${ageMinutes}′ ago in a storm centred ${Math.round(lightning.centerKm)} km ${directionLabel(lightning.bearingDeg, "en")} and spreading ~${lightning.cluster.radiusKm} km around it${lightning.distanceKm === 0 ? ": your site is inside its area" : ""}. Lightning positions are uncertain by ~10–15 km.`,
+  ) : "";
+  const periodText = periods.slice(0, 3).map((period) => `${text.weekday(Date.parse(period.start))} ${text.clock(period.start)}${period.end !== period.start ? `–${text.clock(Date.parse(period.end) + HOUR_MS)}` : ""}`).join(" · ");
+  const distance = lightning ? Math.round(lightning.distanceKm) : 0;
+  const towards = (language: Language) => (lightning ? directionLabel(lightning.bearingDeg, language) : "");
+  const message: Record<LocalStormStatus, { title: string; detail: string }> = {
+    lightning_close: {
+      title: lightning?.distanceKm === 0
         ? t("Κεραυνοί γύρω από τη θέση σου", "Lightning around your site")
-        : near.distanceKm <= LIGHTNING_DANGER_KM
-          ? t(`Κεραυνοί πολύ κοντά, ~${Math.round(near.distanceKm)} km προς ${directionLabel(near.bearingDeg, "el")}`, `Lightning very close, ~${Math.round(near.distanceKm)} km to the ${directionLabel(near.bearingDeg, "en")}`)
-          : t(`Κεραυνοί σε ~${Math.round(near.distanceKm)} km προς ${directionLabel(near.bearingDeg, "el")}`, `Lightning ~${Math.round(near.distanceKm)} km to the ${directionLabel(near.bearingDeg, "en")}`),
+        : t(`Κεραυνοί πολύ κοντά, ~${distance} km προς ${towards("el")}`, `Lightning very close, ~${distance} km to the ${towards("en")}`),
+      detail: lightningDetail,
+    },
+    lightning_near: { title: t(`Κεραυνοί σε ~${distance} km προς ${towards("el")}`, `Lightning ~${distance} km to the ${towards("en")}`), detail: lightningDetail },
+    thunder: { title: t("Το μοντέλο δίνει καταιγίδα στη θέση σου", "The model gives a thunderstorm at your site"), detail: periodText },
+    rain_unstable: { title: t("Το μοντέλο δίνει βροχή με αστάθεια στη θέση σου", "The model gives rain with instability at your site"), detail: periodText },
+    unstable: {
+      title: t("Ασταθής ατμόσφαιρα, χωρίς καταιγίδα στο μοντέλο", "Unstable air, but no storm in the model"),
       detail: t(
-        `Ο δορυφόρος MTG-LI κατέγραψε κεραυνούς πριν από ${near.cluster.ageMinutes}′ σε καταιγίδα με κέντρο ${Math.round(near.centerKm)} km ${directionLabel(near.bearingDeg, "el")} και έκταση ~${near.cluster.radiusKm} km γύρω του${near.distanceKm === 0 ? ": η θέση σου είναι μέσα στην περιοχή της" : ""}. Η θέση των κεραυνών έχει αβεβαιότητα ~10–15 km.`,
-        `MTG-LI recorded lightning ${near.cluster.ageMinutes}′ ago in a storm centred ${Math.round(near.centerKm)} km ${directionLabel(near.bearingDeg, "en")} and spreading ~${near.cluster.radiusKm} km around it${near.distanceKm === 0 ? ": your site is inside its area" : ""}. Lightning positions are uncertain by ~10–15 km.`,
+        `CAPE έως ${num(capeMax)} J/kg και lifted index ${num(liMin, 1)}: μπορεί να αναπτυχθούν καταιγίδες που το μοντέλο δεν δείχνει, συνήθως το απόγευμα. Έλεγχε τον ζωντανό χάρτη.`,
+        `CAPE up to ${num(capeMax)} J/kg and a lifted index of ${num(liMin, 1)}: storms the model does not show can still grow, usually in the afternoon. Keep an eye on the live map.`,
       ),
-    }
-    : periods.length
-      ? {
-        tone: periods.some((period) => period.thunder) ? "warn" : "fair",
-        title: periods[0].thunder ? t("Το μοντέλο δίνει καταιγίδα στη θέση σου", "The model gives a thunderstorm at your site") : t("Το μοντέλο δίνει βροχή με αστάθεια στη θέση σου", "The model gives rain with instability at your site"),
-        detail: periods.slice(0, 3).map((period) => `${text.weekday(Date.parse(period.start))} ${text.clock(period.start)}${period.end !== period.start ? `–${text.clock(Date.parse(period.end) + HOUR_MS)}` : ""}`).join(" · "),
-      }
-      : {
-        tone: "good",
-        title: t("Καμία καταιγίδα στη θέση σου τις επόμενες 48 ώρες", "No storm at your site in the next 48 hours"),
-        detail: t("Σύμφωνα με το μοντέλο· οι καταιγίδες-στόχοι για sprites βρίσκονται 100–300 km μακριά.", "According to the model; target storms for sprites are 100–300 km away."),
-      };
-  const capeValues = upcoming.map((hour) => hour.capeJkg);
-  const capeColors = upcoming.map((hour) => (isStormHour(hour) ? "#f04362" : (hour.capeJkg ?? 0) >= 1000 ? "#e5ad55" : "#6db8e8"));
+    },
+    quiet: {
+      title: t("Καμία καταιγίδα στη θέση σου τις επόμενες 48 ώρες", "No storm at your site in the next 48 hours"),
+      detail: t("Σύμφωνα με το μοντέλο· οι καταιγίδες-στόχοι για sprites βρίσκονται 100–300 km μακριά.", "According to the model; target storms for sprites are 100–300 km away."),
+    },
+  };
+  const StatusIcon = status === "quiet" ? ShieldCheck : status === "unstable" || status === "rain_unstable" ? AlertTriangle : Zap;
+  const capeChart = useMemo(() => {
+    const values = upcoming.map((hour) => hour.capeJkg);
+    return {
+      left: niceAxis(present(values), { min: 0, minSpan: 500 }),
+      series: [{ key: "c", label: "CAPE", values, color: "#6db8e8", kind: "bars", unit: " J/kg", barColors: upcoming.map((hour) => (isStormHour(hour) ? "#f04362" : (hour.capeJkg ?? 0) >= 1000 ? "#e5ad55" : "#6db8e8")) }] as ChartSeries[],
+    };
+  }, [upcoming]);
+  // The provider's order: nearby first, then the most severe, thunderstorms first.
+  const alerts = scan?.weatherAlerts.alerts ?? [];
   return (
     <section className="panel wx-storm wx-span-2">
       <PanelHeading eyebrow={t("ΚΑΤΑΙΓΙΔΕΣ & ΑΣΦΑΛΕΙΑ ΕΔΩ", "LOCAL STORMS & SAFETY")} title={t("Αστάθεια και προειδοποιήσεις", "Instability and warnings")} icon={Zap} />
-      <div className={`wx-alert-box tone-${status.tone}`}>
-        {status.tone === "good" ? <ShieldAlert size={19} /> : <Zap size={19} />}
-        <div><strong>{status.title}</strong><p>{status.detail}</p></div>
+      <div className={`wx-alert-box tone-${STATUS_TONE[status]}`}>
+        <StatusIcon size={19} />
+        <div><strong>{message[status].title}</strong><p>{message[status].detail}</p></div>
       </div>
       <div className="wx-stats compact">
-        <Stat icon={Zap} label={t("CAPE (μέγ. 24ώρου)", "CAPE (24 h max)")} value={`${num(capeMax)} J/kg`} hint={cape ? pick(cape.text) : undefined} tone={cape && cape.level >= 2 ? cape.tone : null} />
+        <Stat icon={Zap} label={t("CAPE (μέγ. 24ώρου)", "CAPE (24 h max)")} value={capeMax != null ? `${num(capeMax)} J/kg` : "—"} hint={cape ? pick(cape.text) : undefined} tone={cape && cape.level >= 2 ? cape.tone : null} />
         <Stat icon={Gauge} label={t("Lifted index (ελάχ.)", "Lifted index (min)")} value={num(liMin, 1)} hint={li ? pick(li.text) : undefined} tone={li && li.level >= 1 ? li.tone : null} />
-        <Stat icon={ShieldAlert} label={t("Αναστολή (CIN)", "Inhibition (CIN)")} value={`${num(cin)} J/kg`} hint={t("εμποδίζει την ανάπτυξη καταιγίδων", "holds storms back")} />
+        <Stat icon={ShieldAlert} label={t("Αναστολή (CIN)", "Inhibition (CIN)")} value={cin != null ? `${num(cin)} J/kg` : "—"} hint={cinText ? pick(cinText.text) : undefined} />
         <Stat icon={CloudLightning} label={t("Ώρες καταιγίδας (48 ώ)", "Storm hours (48 h)")} value={String(stormHours)} hint={periods.length ? `${t("πρώτη", "first")} ${text.weekday(Date.parse(periods[0].start))} ${text.clock(periods[0].start)}` : t("καμία στη θέση σου", "none at your site")} tone={stormHours ? "warn" : null} />
       </div>
-      <TimeChart title={t("Ενέργεια αστάθειας CAPE", "Instability energy (CAPE)")} icon={Zap} times={times} bands={bands} hover={hover} text={text} leftUnit="" left={axisFor(present(capeValues), 0, undefined, 500)}
-        series={[{ key: "c", label: "CAPE", values: capeValues, color: "#6db8e8", kind: "bars", unit: " J/kg", barColors: capeColors }]}
+      <TimeChart title={t("Ενέργεια αστάθειας CAPE", "Instability energy (CAPE)")} icon={Zap} labels={labels} bands={bands} hover={hover} text={text} leftUnit="" left={capeChart.left} series={capeChart.series}
         footer={<p className="wx-chart-note"><i className="wx-key-dot" style={{ background: "#f04362" }} />{t("ώρα με καταιγίδα ή βροχή με αστάθεια", "hour with a storm, or rain with instability")} <i className="wx-key-dot" style={{ background: "#e5ad55" }} />CAPE ≥ 1000</p>}
       />
       <div className="wx-warnings">
         <span className="eyebrow">{t("METEOALARM · ΠΡΟΕΙΔΟΠΟΙΗΣΕΙΣ", "METEOALARM · WARNINGS")}</span>
-        {!scan ? <p className="wx-muted">{t("Αναμονή για τη σάρωση…", "Waiting for the scan…")}</p>
+        {!scan ? <p className="wx-muted">{pick(scanNote)}</p>
           : scan.weatherAlerts.status !== "available" && !alerts.length ? <p className="wx-muted">{pick(scan.weatherAlerts.message)}</p>
-            : alerts.length ? <div className="alert-chips">{alerts.slice(0, 6).map((alert) => <a key={alert.id} href={alert.link} target="_blank" rel="noreferrer"><b>{alert.severity}</b>{alert.event.replace(/ warning/i, "")} · {alert.area}{alert.distanceKm != null && ` · ${Math.round(alert.distanceKm)} km`}{alert.expires && ` · ${t("έως", "until")} ${text.day(alert.expires)} ${text.clock(alert.expires)}`}</a>)}</div>
+            : alerts.length ? <div className="alert-chips">{alerts.slice(0, 6).map((alert) => {
+              const label = alertText(alert);
+              return (
+                <a key={alert.id} href={alert.link} target="_blank" rel="noreferrer">
+                  <b className={`level-${alert.level ?? "unknown"}`}>{label.level ? pick(label.level) : alert.severity}</b>{pick(label.hazard)} · {alert.area}{alert.distanceKm != null && ` · ${Math.round(alert.distanceKm)} km`}{alert.expires && ` · ${t("έως", "until")} ${text.day(alert.expires)} ${text.clock(alert.expires)}`}
+                </a>
+              );
+            })}</div>
               : <p className="wx-muted">{t("Καμία ενεργή προειδοποίηση για την Ελλάδα.", "No active warning for Greece.")}</p>}
       </div>
       <div className="safety-card">
@@ -964,18 +1141,25 @@ const POLLUTANTS: Array<{ key: keyof AirQualityConditions; aqi?: keyof AirQualit
   { key: "aerosolOpticalDepth", label: "AOD", unit: "", digits: 2 },
 ];
 
-function AirPanel({ air, now, latitude, longitude, hover, text }: { air: WeatherStationResponse["airQuality"] | null; now: number; latitude: number; longitude: number; hover: Hover; text: Text }) {
+function AirPanel({ air, now, latitude, longitude, hover, text }: { air: WeatherStationResponse["airQuality"] | null; now: number; latitude: number; longitude: number; hover: HoverStore; text: Text }) {
   const { t, pick } = text;
-  if (!air || air.status !== "available") {
+  const chart = useMemo(() => {
+    if (!air || air.status !== "available") return null;
+    const coming = air.hours.filter((hour) => Date.parse(hour.time) >= now - 30 * 60_000).slice(0, CHART_HOURS);
+    const times = coming.map((hour) => Date.parse(hour.time));
+    const values = coming.map((hour) => hour.europeanAqi);
+    return {
+      labels: timeLabels(times, text),
+      bands: times.map((ms) => twilightBand(sunAltitudeDeg(new Date(ms), latitude, longitude))),
+      left: niceAxis(present(values), { min: 0, minSpan: 60 }),
+      series: [{ key: "aqi", label: "AQI", values, color: "#50ccaa", kind: "bars", unit: "", barColors: coming.map((hour) => { const band = aqiLevel(hour.europeanAqi); return band ? AQI_COLORS[band.level] : null; }) }] as ChartSeries[],
+    };
+  }, [air, now, latitude, longitude, text]);
+  if (!air || air.status !== "available" || !chart) {
     return <section className="panel wx-span-2"><PanelHeading eyebrow={t("ΠΟΙΟΤΗΤΑ ΑΕΡΑ · CAMS", "AIR QUALITY · CAMS")} title={t("Ποιότητα αέρα και ρύπανση", "Air quality and pollution")} icon={Factory} /><p className="wx-muted">{air ? pick(air.message) : "—"}</p></section>;
   }
   const current = air.current ?? air.hours.find((hour) => Math.abs(Date.parse(hour.time) - now) <= 30 * 60_000) ?? null;
   const level = aqiLevel(current?.europeanAqi ?? null);
-  const coming = air.hours.filter((hour) => Date.parse(hour.time) >= now - 30 * 60_000).slice(0, CHART_HOURS);
-  const times = coming.map((hour) => Date.parse(hour.time));
-  const bands = times.map((ms) => twilightBand(sunAltitudeDeg(new Date(ms), latitude, longitude)));
-  const aqiValues = coming.map((hour) => hour.europeanAqi);
-  const aqiColors = coming.map((hour) => { const band = aqiLevel(hour.europeanAqi); return band ? AQI_COLORS[band.level] : null; });
   const pollen = current ? (Object.keys(POLLEN_TEXT) as PollenType[]).map((type) => ({ type, value: current.pollen[type] })) : [];
   const pollenSeason = pollen.some((item) => (item.value ?? 0) >= 1);
   const advice = !level ? "" : level.level <= 1
@@ -1013,9 +1197,7 @@ function AirPanel({ air, now, latitude, longitude, hover, text }: { air: Weather
           ? <div>{pollen.map((item) => <span key={item.type}>{pick(POLLEN_TEXT[item.type])} <strong>{num(item.value)}</strong></span>)}</div>
           : <p className="wx-muted">{t("Εκτός εποχής: το CAMS δεν δίνει γύρη στην περιοχή τώρα (ελιά Απρ–Ιουν, αγρωστώδη Απρ–Ιουλ).", "Out of season: CAMS gives no pollen here now (olive Apr–Jun, grass Apr–Jul).")}</p>}
       </div>
-      <TimeChart title={t("Ευρωπαϊκός δείκτης ποιότητας αέρα", "European air quality index")} icon={Factory} times={times} bands={bands} hover={hover} text={text} leftUnit="" left={axisFor(present(aqiValues), 0, undefined, 60)}
-        series={[{ key: "aqi", label: "AQI", values: aqiValues, color: "#50ccaa", kind: "bars", unit: "", barColors: aqiColors }]}
-      />
+      <TimeChart title={t("Ευρωπαϊκός δείκτης ποιότητας αέρα", "European air quality index")} icon={Factory} labels={chart.labels} bands={chart.bands} hover={hover} text={text} leftUnit="" left={chart.left} series={chart.series} />
     </section>
   );
 }
@@ -1029,12 +1211,14 @@ const LIGHT_POLLUTION: Record<SavedLocation["lightPollution"], { bortle: string;
 
 const LightPanel = memo(function LightPanel({ observer, text, onLocations }: { observer: SavedLocation; text: Text; onLocations: () => void }) {
   const { t, pick } = text;
-  const info = LIGHT_POLLUTION[observer.lightPollution];
+  // Stored sites are not checked for this field: anything unexpected reads as not set.
+  const level = Object.hasOwn(LIGHT_POLLUTION, observer.lightPollution) ? observer.lightPollution : "unknown";
+  const info = LIGHT_POLLUTION[level];
   const mapUrl = `https://www.lightpollutionmap.info/#zoom=9.00&lat=${observer.latitude.toFixed(4)}&lon=${observer.longitude.toFixed(4)}`;
   return (
     <section className="panel wx-light">
       <PanelHeading eyebrow={t("ΦΩΤΟΡΥΠΑΝΣΗ", "LIGHT POLLUTION")} title={t("Φωτεινότητα ουρανού", "Sky brightness")} icon={Lightbulb} />
-      <div className={`wx-bortle level-${observer.lightPollution}`}><strong>{info.bortle}</strong><span>{t("όπως δηλώθηκε για τη θέση", "as set for the site")}</span></div>
+      <div className={`wx-bortle level-${level}`}><strong>{info.bortle}</strong><span>{t("όπως δηλώθηκε για τη θέση", "as set for the site")}</span></div>
       <p className="wx-muted">{pick(info.text)}</p>
       <div className="wx-light-actions">
         <a className="secondary-action" href={mapUrl} target="_blank" rel="noreferrer"><ExternalLink size={15} />{t("Χάρτης φωτορύπανσης", "Light pollution map")}</a>

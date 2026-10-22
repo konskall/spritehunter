@@ -3,7 +3,7 @@
 /* eslint-disable @next/next/no-img-element -- small pre-sized brand PNGs and a live third-party NOAA image that must not be re-encoded */
 
 import dynamic from "next/dynamic";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type InputHTMLAttributes } from "react";
+import { Component, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type InputHTMLAttributes, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -66,7 +66,7 @@ import { cameraPointing } from "@/lib/orientation";
 import { parseNumericDraft } from "@/lib/number-input";
 import { rescoreWithTerrain } from "@/lib/scoring";
 import { elevationSpan, jetEnvelope } from "@/lib/pointing";
-import { directionLabel } from "@/lib/weather";
+import { alertText, directionLabel } from "@/lib/weather";
 import { evaluateAlert, type AlertPreferences } from "@/lib/notifications";
 import { isAlertPrefs, isLanguage, isLastAlert, isLensList, isLocationList, isLogEntry, isLogList, isOrientation, isSavedLocation, isSearchRange, isString, migrateSearchRange } from "@/lib/persisted-validators";
 import MapLoader, { type MapLoadState } from "@/components/MapLoader";
@@ -740,18 +740,20 @@ export default function SpriteHunterApp({ initialLanguage }: { initialLanguage: 
         </header>
 
         <div className="content">
-          {screen === "dashboard" && <DashboardView data={data} candidates={candidates} selected={selected} loading={loading} error={error} observer={site} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onPoint={goPoint} onMap={() => setScreen("map")} onSelect={selectCandidate} />}
+          <ScreenBoundary key={screen}>
+          {screen === "dashboard" &&<DashboardView data={data} candidates={candidates} selected={selected} loading={loading} error={error} observer={site} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onPoint={goPoint} onMap={() => setScreen("map")} onSelect={selectCandidate} />}
           {screen === "map" && <MapView candidates={candidates} selected={selected} observer={observer} radar={radar} radarVisible={radarVisible} lightningVisible={lightningVisible} infraredVisible={infraredVisible} cloudTopVisible={cloudTopVisible} instabilityVisible={instabilityVisible} ringsVisible={ringsVisible} eumetsat={eumetsat} onRadar={setRadarVisible} onLightning={setLightningVisible} onInfrared={setInfraredVisible} onCloudTop={setCloudTopVisible} onInstability={setInstabilityVisible} onRings={setRingsVisible} onSelect={selectCandidate} onPoint={goPoint} />}
           {screen === "forecast" && <ForecastView candidates={candidates} selected={selected} onSelect={selectCandidate} onPoint={goPoint} />}
           {screen === "point" && <PointView candidate={selected} observer={observer} lens={selectedLens} fov={fov} framing={framing} terrain={terrain} terrainLoading={terrainLoading && !terrain} sky={currentSky} language={language} />}
           {screen === "sky" && <SkyView candidate={selected} observer={observer} terrain={terrain} fov={fov} lens={selectedLens} orientation={orientation} sky={currentSky} onOrientation={setOrientation} />}
           {screen === "aurora" && <AuroraView aurora={aurora} loading={auroraLoading} lens={selectedLens} observer={site} forecast={data?.observerForecast ?? []} />}
-          {screen === "weather" && <WeatherView key={`${observer.latitude}:${observer.longitude}`} language={language} observer={site} scan={data} refreshKey={checkedAt} onMap={() => setScreen("map")} onLocations={() => setScreen("locations")} />}
+          {screen === "weather" && <WeatherView key={`${observer.latitude}:${observer.longitude}`} language={language} observer={site} scan={data} scanError={error} refreshKey={checkedAt} onMap={() => setScreen("map")} onLocations={() => setScreen("locations")} />}
           {screen === "locations" && <LocationsView observer={site} locations={siteList} candidate={selected} onObserver={setObserver} onLocations={setLocations} />}
           {screen === "camera" && <CameraView candidate={selected} lenses={lenses} selectedLens={selectedLens} fov={fov} framing={framing} orientation={orientation} sky={currentSky} onSelect={setSelectedLensId} onLenses={setLenses} onOrientation={setOrientation} />}
           {screen === "logbook" && <LogbookView logs={logs} candidate={selected} lens={selectedLens} onLogs={setLogs} />}
           {screen === "alerts" && <AlertsView candidate={topCandidate} prefs={alertPrefs} lastAlert={lastAlert} permission={notificationPermission} onPrefs={setAlertPrefs} onRequestPermission={requestNotifications} />}
           {screen === "settings" && <SettingsView observer={site} range={range} data={data} language={language} eumetsat={eumetsat} radarStatus={radarStatus} onObserver={setObserver} onRange={setRange} onLanguage={setLanguage} onRefresh={manualRefresh} />}
+          </ScreenBoundary>
         </div>
       </main>
 
@@ -761,6 +763,35 @@ export default function SpriteHunterApp({ initialLanguage }: { initialLanguage: 
     </div>
     </LanguageContext.Provider>
   );
+}
+
+/**
+ * Keeps a crash inside one screen from taking down the whole app: the screen shows a message
+ * and the navigation keeps working. Remounted (and so reset) on every screen change.
+ */
+class ScreenBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  static contextType = LanguageContext;
+  declare context: Language;
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    const greek = this.context !== "en";
+    return (
+      <div className="panel screen-error" role="alert">
+        <AlertTriangle size={20} />
+        <div>
+          <strong>{greek ? "Αυτή η σελίδα παρουσίασε σφάλμα." : "This screen ran into an error."}</strong>
+          <p>{greek ? "Οι υπόλοιπες σελίδες λειτουργούν κανονικά. Δοκίμασε ξανά ή άλλαξε σελίδα." : "The other screens still work. Try again or switch screens."}</p>
+          <button className="secondary-action" onClick={() => this.setState({ failed: false })}>{greek ? "Δοκίμασε ξανά" : "Try again"}</button>
+        </div>
+      </div>
+    );
+  }
 }
 
 /** Carries a server error in both languages through `throw`. */
@@ -876,7 +907,10 @@ function DashboardView({ data, candidates, selected, loading, error, observer, l
               <div><span>{t("METEOALARM · ΕΛΛΑΔΑ", "METEOALARM · GREECE")}</span><StatusDot status={alerts?.status ?? "stale"} /></div>
               <strong>{alertTotal ? t(`${alertTotal} προειδοποιήσεις · ${alerts?.nearbyCount ?? 0} κοντά σου`, `${alertTotal} warnings · ${alerts?.nearbyCount ?? 0} near you`) : t("Καμία ενεργή προειδοποίηση", "No active warning")}</strong>
               <p>{alerts ? pick(alerts.message) : t("Αναμονή για επίσημη ροή…", "Waiting for the official feed…")}</p>
-              <div className="alert-chips">{alerts?.alerts.slice(0, 4).map((alert) => <a key={alert.id} href={alert.link} target="_blank" rel="noreferrer"><b>{alert.severity}</b>{alert.event.replace(/ warning/i, "")} · {alert.area}</a>)}</div>
+              <div className="alert-chips">{alerts?.alerts.slice(0, 4).map((alert) => {
+                const label = alertText(alert);
+                return <a key={alert.id} href={alert.link} target="_blank" rel="noreferrer"><b className={`level-${alert.level ?? "unknown"}`}>{label.level ? pick(label.level) : alert.severity}</b>{pick(label.hazard)} · {alert.area}</a>;
+              })}</div>
             </article>
           </div>
         </section>

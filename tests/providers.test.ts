@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { eumetsatImageUrl, worldPixelToMercator } from "@/lib/providers/eumetsat";
-import { metarCloudCoverPercent, metarCloudSummary, metarVisibility, selectAviationReport } from "@/lib/providers/aviation-weather";
+import { fetchNearestAviationWeather, metarCloudCoverPercent, metarCloudSummary, metarVisibility, selectAviationReport } from "@/lib/providers/aviation-weather";
 import { parseMeteoAlarmFeed } from "@/lib/providers/meteoalarm";
 import { assessAurora, parseOvationCoordinates } from "@/lib/providers/aurora";
 
@@ -109,6 +109,39 @@ describe("MeteoAlarm ordering and counts", () => {
   it("decodes double-escaped area names", () => {
     const result = parseMeteoAlarmFeed(feed([entry("e", "East Sterea &amp;amp; Evvoia", "Yellow Warning", "Moderate")]), "2026-10-12T17:00:00Z");
     expect(result.alerts[0].area).toBe("East Sterea & Evvoia");
+  });
+  it("reads the hazard and colour from the title when cap:event names only the colour", () => {
+    // The live Greek feed (22 Oct 2026): cap:event "Yellow Warning", hazard only in the title.
+    const titled = (id: string, title: string) => entry(id, "Ionion Islands", "Yellow Warning", "Moderate").replace("</entry>", `<title>${title}</title></entry>`);
+    const result = parseMeteoAlarmFeed(feed([
+      titled("rain", "Yellow Rain Warning issued for Greece - Ionion Islands"),
+      titled("storm", "Yellow Thunderstorm Warning issued for Greece - Ionion Islands"),
+    ]), "2026-10-12T17:00:00Z", sparta);
+    expect(result.alerts.map((alert) => [alert.id, alert.hazard, alert.level])).toEqual([
+      ["storm", "Thunderstorm", "yellow"],
+      ["rain", "Rain", "yellow"],
+    ]);
+  });
+  it("still reads older entries that name the hazard in cap:event", () => {
+    const result = parseMeteoAlarmFeed(feed([entry("old", "Thraki", "Severe Thunderstorm warning", "Severe")]), "2026-10-12T17:00:00Z");
+    expect(result.alerts[0]).toMatchObject({ hazard: "Thunderstorm", level: "orange" });
+  });
+});
+
+describe("AviationWeather report fields", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("takes temperature, dew point, pressure and gusts from the report itself", async () => {
+    // Shaped like the live JSON for LGKL on 22 Oct 2026, with a gust added.
+    const report = {
+      icaoId: "LGKL", obsTime: Math.floor(Date.now() / 1000) - 600, lat: 37.068, lon: 22.025, name: "Kalamata Arpt, J, GR",
+      visib: "6+", wdir: 300, wspd: 12, wgst: 25, temp: 16, dewp: 15, altim: 1018, fltCat: "VFR",
+      rawOb: "METAR LGKL 220550Z 30012G25KT 9999 FEW010 16/15 Q1018", clouds: [{ cover: "FEW", base: 1000 }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => Response.json(String(input).includes("/taf") ? [] : [report])));
+    const observation = await fetchNearestAviationWeather(sparta);
+    // 25 kt = 46.3 km/h.
+    expect(observation).toMatchObject({ stationId: "LGKL", temperatureC: 16, dewPointC: 15, pressureHpa: 1018, windGustKmh: 46 });
   });
 });
 

@@ -2,21 +2,27 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AirQualityConditions, LightningCluster, StationHour } from "@/lib/domain";
 import { fetchWeatherStation, parseAirQuality, parseStationForecast } from "@/lib/providers/weather-station";
 import {
+  alertText,
   aqiLevel,
   beaufort,
   capeLevel,
+  cinLevel,
   directionLabel,
+  isSameSite,
   isStormHour,
   liftedIndexLevel,
-  metarReadings,
+  localStormStatus,
   nearestLightning,
   nightOutlook,
   pressureTendency,
+  rainAhead,
+  rainNextHour,
   stormPeriods,
   uvLevel,
   weatherCodeInfo,
 } from "@/lib/weather";
-import { moonDay, moonPhaseName, nextMoonQuarters, nightWindow, sunDay, twilightBand } from "@/lib/sky-calendar";
+import { moonDay, moonPhaseName, nextMoonQuarters, nextMoonRiseSet, nightWindow, sunDay, twilightBand } from "@/lib/sky-calendar";
+import { athensDayBounds, athensDayDifference, athensNoon } from "@/lib/time";
 
 // Open-Meteo answers with Unix seconds (timeformat=unixtime); 1792162800 is 2026-10-16 15:00 UTC.
 const FORECAST = {
@@ -157,13 +163,6 @@ describe("weather helpers", () => {
     expect(liftedIndexLevel(7)?.tone).toBe("good");
   });
 
-  it("reads temperature, dew point and pressure from a METAR", () => {
-    expect(metarReadings("LGKL 161520Z 09008KT 9999 FEW020 SCT040 18/12 Q1014 NOSIG")).toEqual({ temperatureC: 18, dewPointC: 12, pressureHpa: 1014 });
-    expect(metarReadings("KJFK 161551Z 31012KT 10SM FEW250 M02/M05 A2992 RMK AO2 SLP132 T10221050")).toEqual({ temperatureC: -2, dewPointC: -5, pressureHpa: 1013.2 });
-    expect(metarReadings("LGAV 161520Z 36010KT CAVOK M01/ Q1020")).toEqual({ temperatureC: -1, dewPointC: null, pressureHpa: 1020 });
-    expect(metarReadings(null)).toEqual({ temperatureC: null, dewPointC: null, pressureHpa: null });
-  });
-
   it("merges consecutive storm hours and finds the nearest observed storm by its edge", () => {
     const hours = [
       hour("2026-10-16T18:00:00Z", { weatherCode: 95 }),
@@ -268,5 +267,112 @@ describe("sun and moon calendar", () => {
 
   it("bands the Sun's altitude into day and twilights", () => {
     expect([5, -0.5, -3, -9, -15, -20].map(twilightBand)).toEqual(["day", "day", "civil", "nautical", "astronomical", "night"]);
+  });
+});
+
+describe("Athens calendar days", () => {
+  it("finds the start and end of an Athens day, 25 or 23 hours long when the clocks change", () => {
+    expect(athensDayBounds(new Date("2026-10-22T09:00:00Z"))).toEqual({ start: new Date("2026-10-21T21:00:00Z"), end: new Date("2026-10-22T21:00:00Z") });
+    // Clocks go back at 04:00 on 25 Oct 2026: that day runs from 21:00 to 22:00 UTC.
+    expect(athensDayBounds(new Date("2026-10-25T10:00:00Z"))).toEqual({ start: new Date("2026-10-24T21:00:00Z"), end: new Date("2026-10-25T22:00:00Z") });
+    // Clocks go forward at 03:00 on 28 Mar 2027: a 23-hour day.
+    expect(athensDayBounds(new Date("2027-03-28T10:00:00Z"))).toEqual({ start: new Date("2027-03-27T22:00:00Z"), end: new Date("2027-03-28T21:00:00Z") });
+  });
+
+  it("steps whole calendar days, also across a clock change", () => {
+    // Sat 27 Mar 2027 23:30 EET: 24 hours later is already Monday, the next day is Sunday.
+    expect(athensNoon(new Date("2027-03-27T21:30:00Z"), 1).toISOString()).toBe("2027-03-28T09:00:00.000Z");
+    // Mon 29 Mar 00:30 EEST: the day before is Sunday.
+    expect(athensNoon(new Date("2027-03-28T21:30:00Z"), -1).toISOString()).toBe("2027-03-28T09:00:00.000Z");
+    expect(athensNoon(new Date("2026-10-22T09:00:00Z")).toISOString()).toBe("2026-10-22T09:00:00.000Z");
+  });
+
+  it("counts calendar days between two instants, not 24-hour spans", () => {
+    expect(athensDayDifference(new Date("2026-10-22T19:00:00Z"), new Date("2026-10-24T05:00:00Z"))).toBe(2); // Thu 22:00 → Sat 08:00
+    expect(athensDayDifference(new Date("2026-10-22T23:00:00Z"), new Date("2026-10-23T19:00:00Z"))).toBe(0); // Fri 02:00 → Fri 22:00
+    expect(athensDayDifference(new Date("2026-10-22T19:00:00Z"), new Date("2026-10-26T04:11:00Z"))).toBe(4); // Thu → Mon
+    expect(athensDayDifference(new Date("2026-10-24T20:30:00Z"), new Date("2026-10-25T21:30:00Z"))).toBe(1); // Sat → Sun, clocks back between
+    expect(athensDayDifference(new Date("2026-10-23T09:00:00Z"), new Date("2026-10-22T09:00:00Z"))).toBe(-1);
+  });
+});
+
+describe("sky events that span days", () => {
+  it("plans a single night across the spring clock change", () => {
+    // Astronomy Engine: civil dusk Sat 27 Mar 2027 17:14:02 UTC, civil dawn Sun 28 Mar 03:56:33 UTC.
+    const saturday = nightWindow(new Date("2027-03-27T21:30:00Z"), SPARTA.latitude, SPARTA.longitude)!;
+    near(saturday.start, "2027-03-27T17:14:02Z", 1);
+    near(saturday.end, "2027-03-28T03:56:33Z", 1);
+    // Mon 29 Mar 00:30 EEST, before dawn: the night that began on Sunday (17:14:57 → 03:55:03 UTC).
+    const sunday = nightWindow(new Date("2027-03-28T21:30:00Z"), SPARTA.latitude, SPARTA.longitude)!;
+    near(sunday.start, "2027-03-28T17:14:57Z", 1);
+    near(sunday.end, "2027-03-29T03:55:03Z", 1);
+  });
+
+  it("gives the next moonrise and moonset, not the day's past ones", () => {
+    // Astronomy Engine, from Thu 22 Oct 2026 09:13 Athens: rise 13:39:28 UTC, set Fri 01:36:28 UTC.
+    const morning = nextMoonRiseSet(new Date("2026-10-22T06:13:00Z"), SPARTA.latitude, SPARTA.longitude);
+    near(morning.rise, "2026-10-22T13:39:28Z", 3);
+    near(morning.set, "2026-10-23T01:36:28Z", 3);
+    // From 23:00 Athens the same day: set 01:36:28 UTC, next rise Fri 14:04:11 UTC.
+    const evening = nextMoonRiseSet(new Date("2026-10-22T20:00:00Z"), SPARTA.latitude, SPARTA.longitude);
+    near(evening.rise, "2026-10-23T14:04:11Z", 3);
+    near(evening.set, "2026-10-23T01:36:28Z", 3);
+  });
+});
+
+describe("rain by the hour", () => {
+  // Open-Meteo stamps each hour's precipitation and probability at the hour's end: 10:00 holds 09:00–10:00.
+  const hours = [
+    hour("2026-10-22T09:00:00Z", { precipitationMm: 0, precipitationProbability: 5 }),
+    hour("2026-10-22T10:00:00Z", { precipitationMm: 0.4, precipitationProbability: 30 }),
+    hour("2026-10-22T11:00:00Z", { precipitationMm: 2.5, precipitationProbability: 80 }),
+  ];
+
+  it("lines each hour up with the rain that falls after it", () => {
+    expect(rainAhead(hours)).toEqual([{ mm: 0.4, chance: 30 }, { mm: 2.5, chance: 80 }, { mm: null, chance: null }]);
+  });
+
+  it("reads «rain next hour» from the coming hour, not the one under way", () => {
+    expect(rainNextHour(hours, Date.parse("2026-10-22T09:55:00Z"))).toEqual({ mm: 2.5, chance: 80 });
+    expect(rainNextHour(hours, Date.parse("2026-10-22T09:05:00Z"))).toEqual({ mm: 0.4, chance: 30 });
+    expect(rainNextHour(hours, Date.parse("2026-10-22T10:45:00Z"))).toBeNull();
+  });
+});
+
+describe("local storm judgement", () => {
+  it("rates convective inhibition instead of always calling it a brake", () => {
+    expect([0, 43, 120, 300].map((value) => cinLevel(value)?.level)).toEqual([0, 1, 2, 3]);
+    expect(cinLevel(0)?.text.en).toBe("No cap: storms start easily");
+    expect(cinLevel(null)).toBeNull();
+  });
+
+  it("calls an unstable dry atmosphere unstable, not storm-free", () => {
+    expect(localStormStatus({ periods: [], lightningKm: null, capeMax: 970, liftedMin: -2.5 })).toBe("unstable");
+    expect(localStormStatus({ periods: [], lightningKm: null, capeMax: 970, liftedMin: 1 })).toBe("quiet");
+    expect(localStormStatus({ periods: [], lightningKm: null, capeMax: 300, liftedMin: -3 })).toBe("quiet");
+    expect(localStormStatus({ periods: [], lightningKm: null, capeMax: null, liftedMin: null })).toBe("quiet");
+  });
+
+  it("puts observed lightning before the model, and thunder before rain", () => {
+    const thunder = [{ start: "2026-10-22T18:00:00Z", end: "2026-10-22T19:00:00Z", thunder: true }];
+    const rain = [{ start: "2026-10-22T18:00:00Z", end: "2026-10-22T18:00:00Z", thunder: false }];
+    expect(localStormStatus({ periods: thunder, lightningKm: 12, capeMax: 2000, liftedMin: -5 })).toBe("lightning_close");
+    expect(localStormStatus({ periods: thunder, lightningKm: 45, capeMax: 2000, liftedMin: -5 })).toBe("lightning_near");
+    expect(localStormStatus({ periods: thunder, lightningKm: 90, capeMax: 2000, liftedMin: -5 })).toBe("thunder");
+    expect(localStormStatus({ periods: rain, lightningKm: null, capeMax: 400, liftedMin: -1 })).toBe("rain_unstable");
+  });
+
+  it("matches a scan to its own site only", () => {
+    expect(isSameSite({ latitude: 37.075, longitude: 22.43 }, { latitude: 37.075, longitude: 22.43 })).toBe(true);
+    expect(isSameSite({ latitude: 37.075, longitude: 22.43 }, { latitude: 40.6, longitude: 22.95 })).toBe(false);
+    expect(isSameSite({ latitude: 37.075, longitude: 22.43 }, { latitude: 37.0751, longitude: 22.43 })).toBe(false);
+  });
+
+  it("names a MeteoAlarm warning by its colour and hazard in both languages", () => {
+    expect(alertText({ hazard: "Thunderstorm", level: "yellow" })).toEqual({ level: { el: "Κίτρινη", en: "Yellow" }, hazard: { el: "Καταιγίδα", en: "Thunderstorm" } });
+    expect(alertText({ hazard: "High-temperature", level: "orange" })).toEqual({ level: { el: "Πορτοκαλί", en: "Orange" }, hazard: { el: "Υψηλές θερμοκρασίες", en: "High temperature" } });
+    // A hazard the app does not know stays as reported; a missing one reads as a plain warning.
+    expect(alertText({ hazard: "Dust", level: null })).toEqual({ level: null, hazard: { el: "Dust", en: "Dust" } });
+    expect(alertText({ hazard: null, level: "red" }).hazard).toEqual({ el: "Προειδοποίηση", en: "Warning" });
   });
 });
